@@ -1,5 +1,5 @@
 /*
-Orinal output:
+Original output:
 3.142425985001098
 */
 
