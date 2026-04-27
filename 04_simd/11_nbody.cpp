@@ -4,7 +4,7 @@
 #include <x86intrin.h> 
 
 int main() {
-  //
+  //CPU doesn't support AVX-512 --> switch to AVX2
   const int N = 8;
   float x[N], y[N], m[N], fx[N], fy[N];
   for(int i=0; i<N; i++) {
@@ -53,6 +53,7 @@ for(int i = 0; i < N; i++) {
 
         printf("%d %g %g\n", i, fx[i], fy[i]);
     }
+    //compared - gives same results as original algorithm with N = 8
   }
 
 
