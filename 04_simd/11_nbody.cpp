@@ -17,6 +17,8 @@ int main() {
   __m256 xvec = _mm256_load_ps(x);
   __m256 yvec = _mm256_load_ps(y);
   __m256 mvec = _mm256_load_ps(m);
+
+  //from 1st try
   __m256 zerovec = _mm256_setzero_ps();
   __m256 vecx_masked = _mm256_setzero_ps();
   __m256 vecy_masked = _mm256_setzero_ps();
