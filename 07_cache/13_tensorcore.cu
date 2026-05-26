@@ -10,8 +10,22 @@ using namespace nvcuda;
 
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
            float *d_a, float *d_b, float *d_c) {
-  int offset_a_m = 128 * blockIdx.x;
-  int offset_b_n = 64 * blockIdx.y;
+
+
+  // Grid Swizzling: Umverteilung der Blöcke in 8er-Panels
+  const int panel_width = 8;
+  int bid = blockIdx.y * gridDim.x + blockIdx.x; 
+  
+  int panel_id = bid / (gridDim.y * panel_width);
+  int bid_within_panel = bid % (gridDim.y * panel_width);
+  
+  int new_blockIdx_x = panel_id * panel_width + (bid_within_panel % panel_width);
+  int new_blockIdx_y = bid_within_panel / panel_width;
+  
+  if (new_blockIdx_x >= gridDim.x || new_blockIdx_y >= gridDim.y) return;
+
+  int offset_a_m = 128 * new_blockIdx_x;
+  int offset_b_n = 64 * new_blockIdx_y;
   int warp_id = threadIdx.x / 32;
 
   __shared__ half __align__(16) block_a[2][16][136]; 
@@ -243,3 +257,13 @@ int main(int argc, const char **argv) {
  * 10. Rollback to optimal config:
  * Reverted to K=16 with Double Buffering.
 */
+
+/*
+ * 11. K-Dimension without Double Buffering: 
+ * Tested K=32 with Single Buffering.
+ * Performance: Dropped to ~34,269 GFLOPS.
+ * Reason: Total loss of latency hiding. Tensor Cores stalled during memory fetches.
+ * * 12. Rollback to optimal config:
+ * Reverted to 128 Threads, Tile 128x64, K=16 with Double Buffering.
+ * Performance restored to: ~67,551 GFLOPS.
+ */
