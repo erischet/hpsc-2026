@@ -8,16 +8,6 @@
 using namespace std;
 using namespace nvcuda;
 
-#include <iostream>
-#include <typeinfo>
-#include <random>
-#include <stdint.h>
-#include <cublas_v2.h>
-#include <mma.h>
-#include <chrono>
-using namespace std;
-using namespace nvcuda;
-
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
            float *d_a, float *d_b, float *d_c) {
 
@@ -195,18 +185,18 @@ int main(int argc, const char **argv) {
   for (int i = 0; i < Nt+2; i++) {                        //warm up
     if (i == 2) tic = chrono::steady_clock::now();
     cublasGemmEx(cublas_handle,                           //as defined above
-		 CUBLAS_OP_N,                                         //no transpose
-		 CUBLAS_OP_N,
-		 m,                                                   //sizes of matracies
-		 n,
-		 k,
-		 &alpha,                                              //requires pointers because of fortran background
-		 A, CUDA_R_32F, m,                                    //pointer, data-type & lengh of rows
-		 B, CUDA_R_32F, k,
-		 &beta,
-		 C, CUDA_R_32F, m,
-		 CUBLAS_COMPUTE_32F_FAST_16F,
-		 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+     CUBLAS_OP_N,                                         //no transpose
+     CUBLAS_OP_N,
+     m,                                                   //sizes of matracies
+     n,
+     k,
+     &alpha,                                              //requires pointers because of fortran background
+     A, CUDA_R_32F, m,                                    //pointer, data-type & lengh of rows
+     B, CUDA_R_32F, k,
+     &beta,
+     C, CUDA_R_32F, m,
+     CUBLAS_COMPUTE_32F_FAST_16F,
+     CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     cudaDeviceSynchronize();
   }
   auto toc = chrono::steady_clock::now();
@@ -221,13 +211,18 @@ int main(int argc, const char **argv) {
 
   int smem_size = (3 * 32 * 136 + 3 * 128 * 40) * sizeof(half); // ca. 56.8 KB
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-  kernel<<<grid, block, smem_size>>>(m, n, k, A, B, C2);
+  
+  for (int i = 0; i < Nt+2; i++) {
+    if (i == 2) tic = chrono::steady_clock::now();
+    kernel<<<grid, block, smem_size>>>(m, n, k, A, B, C2);
     cudaDeviceSynchronize();
   }
+  
   toc = chrono::steady_clock::now();
   double tcutlass = chrono::duration<double>(toc - tic).count() / Nt;
   double cutlass_flops = double(num_flops) / tcutlass / 1.0e9;
   printf("CUBLAS: %.2f Gflops, CUTLASS: %.2f Gflops\n", cublas_flops, cutlass_flops);
+  
   double err = 0;
   for (int i=0; i<n; i++) {
     for (int j=0; j<m; j++) {
@@ -235,6 +230,7 @@ int main(int argc, const char **argv) {
     }
   }
   printf("error: %lf\n", err/n/m);
+  
   cudaFree(A);
   cudaFree(B);
   cudaFree(C);
@@ -278,35 +274,27 @@ int main(int argc, const char **argv) {
  * 8. Double Buffering: 
  * Implemented ping-pong buffers to hide global memory latency.
  * Performance: ~67,551 GFLOPS.
- */
-
- /*
+ *
  * 9. K-Dimension Scaling (K=32): 
  * Increased K-Tile size from 16 to 32.
  * Doubled arithmetic intensity by feeding 32 elements to Tensor Cores per loop.
  * Retained 128 threads and optimal register count.
  * Performance:  58874.55 Gflops
- */
-
- /*
+ *
  * 10. Rollback to optimal config:
  * Reverted to K=16 with Double Buffering.
-*/
-
-/*
+ *
  * 11. K-Dimension without Double Buffering: 
  * Tested K=32 with Single Buffering.
  * Performance: Dropped to ~34,269 GFLOPS.
  * Reason: Total loss of latency hiding. Tensor Cores stalled during memory fetches.
- * * 12. Rollback to optimal config:
- * Reverted to 128 Threads, Tile 128x64, K=16 with Double Buffering.
- * Perform
- 
- /*
+ *
  * 12. L2-Cache Optimization (Grid Swizzling): 
  * Reordered block execution into 8x8 panels to maximize L2-Cache hits 
  * and data locality for matrices A and B.
  * Performance: ~71,412 GFLOPS.
+ *
+ * 13. Loop Unrolling:
+ * Added #pragma unroll to statically sized loops.
  */
-
 
