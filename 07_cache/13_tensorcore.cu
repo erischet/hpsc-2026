@@ -9,75 +9,106 @@ using namespace std;
 using namespace nvcuda;
 
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
-		       float *d_a, float *d_b, float *d_c) {
-  int offset_a_m = 128 * blockIdx.x;                           //for e.g. block 2 --> 64
+           float *d_a, float *d_b, float *d_c) {
+  int offset_a_m = 128 * blockIdx.x;
   int offset_b_n = 64 * blockIdx.y;
-  //int i = threadIdx.x;
-  int warp_id = threadIdx.x / 32;                             //32 is a hardware value of the gpu
+  int warp_id = threadIdx.x / 32;
 
-  // +8 verschiebt die Speicheradressen und löst die Bank Conflicts auf --> Imporvements by almost 100 %
-  __shared__ half __align__(16) block_a[16][128 + 8]; 
-  __shared__ half __align__(16) block_b[16][64 + 8];                          //probably introduces error compared to other programms
+  __shared__ half __align__(16) block_a[2][16][136]; 
+  __shared__ half __align__(16) block_b[2][16][72];
 
-  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4]; //reserving storage in register for tensor cores;
-                                  //m,  n,  k,  
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   for (int r = 0; r < 2; r++)
     for (int c = 0; c < 4; c++)
-      wmma::fill_fragment(acc[r][c], 0.0f);                   //set values to 0 for initialisation
+      wmma::fill_fragment(acc[r][c], 0.0f);
 
-  for (int k = 0; k < dim_k; k += 16) {
-      __syncthreads(); 
-      
-      for (int step = 0; step < 4; ++step) {
-        int logical_id = step * 128 + threadIdx.x; // ID von 0 bis 511
-        int r = logical_id / 32;                   // Zeile (0 bis 15)
-        int c = (logical_id % 32) * 4;             // Spalte (0, 4, 8 ... 124)
-        
-        float4 vec_a = reinterpret_cast<float4*>(&d_a[(k + r) * dim_m + offset_a_m + c])[0];
-        block_a[r][c + 0] = __float2half(vec_a.x);
-        block_a[r][c + 1] = __float2half(vec_a.y);
-        block_a[r][c + 2] = __float2half(vec_a.z);
-        block_a[r][c + 3] = __float2half(vec_a.w);
-      }
+  // Prolog: Erste Kachel (k=0) in Puffer 0 laden
+  for (int step = 0; step < 4; ++step) {
+    int logical_id = step * 128 + threadIdx.x;
+    int r = logical_id / 32;
+    int c = (logical_id % 32) * 4;
+    float4 vec_a = reinterpret_cast<float4*>(&d_a[r * dim_m + offset_a_m + c])[0];
+    block_a[0][r][c + 0] = __float2half(vec_a.x);
+    block_a[0][r][c + 1] = __float2half(vec_a.y);
+    block_a[0][r][c + 2] = __float2half(vec_a.z);
+    block_a[0][r][c + 3] = __float2half(vec_a.w);
+  }
+  for (int step = 0; step < 2; ++step) {
+    int logical_id = step * 128 + threadIdx.x;
+    int n_idx = logical_id / 4;
+    int k_idx = (logical_id % 4) * 4;
+    float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k_idx])[0];
+    block_b[0][k_idx + 0][n_idx] = __float2half(vec_b.x);
+    block_b[0][k_idx + 1][n_idx] = __float2half(vec_b.y);
+    block_b[0][k_idx + 2][n_idx] = __float2half(vec_b.z);
+    block_b[0][k_idx + 3][n_idx] = __float2half(vec_b.w);
+  }
+  __syncthreads();
 
-      // 2. Matrix B laden (2 Schritte pro Thread, koalesziert)
-      for (int step = 0; step < 2; ++step) {
-        int logical_id = step * 128 + threadIdx.x; // ID von 0 bis 255
-        int n_idx = logical_id / 4;                // Spalte (0 bis 63)
-        int k_idx = (logical_id % 4) * 4;          // Zeile (0, 4, 8, 12)
-        
-        float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k + k_idx])[0];
-        block_b[k_idx + 0][n_idx] = __float2half(vec_b.x);
-        block_b[k_idx + 1][n_idx] = __float2half(vec_b.y);
-        block_b[k_idx + 2][n_idx] = __float2half(vec_b.z);
-        block_b[k_idx + 3][n_idx] = __float2half(vec_b.w);
-      }
-      __syncthreads(); 
-      //loading the data is finished
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag[4];
 
-    //Improvements for 08 - not sure if really of advantage, performance almost doesn't get better
-    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
-    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag[4];
+  int write_idx = 0;
+  
+  // Hauptschleife: Laden für nächsten Schritt und Rechnen mit aktuellem Schritt überlappen
+  for (int k = 16; k < dim_k; k += 16) {
+    write_idx = 1 - write_idx;
+    int read_idx = 1 - write_idx;
 
+    // 1. Puffer für nächsten Durchlauf laden (k)
+    for (int step = 0; step < 4; ++step) {
+      int logical_id = step * 128 + threadIdx.x;
+      int r = logical_id / 32;
+      int c = (logical_id % 32) * 4;
+      float4 vec_a = reinterpret_cast<float4*>(&d_a[(k + r) * dim_m + offset_a_m + c])[0];
+      block_a[write_idx][r][c + 0] = __float2half(vec_a.x);
+      block_a[write_idx][r][c + 1] = __float2half(vec_a.y);
+      block_a[write_idx][r][c + 2] = __float2half(vec_a.z);
+      block_a[write_idx][r][c + 3] = __float2half(vec_a.w);
+    }
+    for (int step = 0; step < 2; ++step) {
+      int logical_id = step * 128 + threadIdx.x;
+      int n_idx = logical_id / 4;
+      int k_idx = (logical_id % 4) * 4;
+      float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k + k_idx])[0];
+      block_b[write_idx][k_idx + 0][n_idx] = __float2half(vec_b.x);
+      block_b[write_idx][k_idx + 1][n_idx] = __float2half(vec_b.y);
+      block_b[write_idx][k_idx + 2][n_idx] = __float2half(vec_b.z);
+      block_b[write_idx][k_idx + 3][n_idx] = __float2half(vec_b.w);
+    }
+
+    // 2. Mit Daten aus vorherigem Durchlauf rechnen (k-16)
     for (int r = 0; r < 2; r++) {
       int row_tile = warp_id * 2 + r;
-      // Stride 136 (128 nutzbare Daten + 8 Padding)
-      wmma::load_matrix_sync(a_frag[r], &block_a[0][row_tile * 16], 136);
+      wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
     }
-
     for (int c = 0; c < 4; c++) {
-      // Stride 72 (64 nutzbare Daten + 8 Padding)
-      wmma::load_matrix_sync(b_frag[c], &block_b[0][c * 16], 72);
+      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
     }
-
     for (int r = 0; r < 2; r++) {
       for (int c = 0; c < 4; c++) {
         wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
       }
     }
+    __syncthreads();
   }
-  //end improvement 08
 
+  // Epilog: Letzte geladene Kachel berechnen
+  int read_idx = write_idx;
+  for (int r = 0; r < 2; r++) {
+    int row_tile = warp_id * 2 + r;
+    wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
+  }
+  for (int c = 0; c < 4; c++) {
+    wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
+  }
+  for (int r = 0; r < 2; r++) {
+    for (int c = 0; c < 4; c++) {
+      wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
+    }
+  }
+
+  // Zurückschreiben in C
   for (int r = 0; r < 2; r++) {
     for (int c = 0; c < 4; c++) {
       int c_m = offset_a_m + (warp_id * 2 + r) * 16;
