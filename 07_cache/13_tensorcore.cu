@@ -15,8 +15,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int i = threadIdx.x;
   int warp_id = threadIdx.x / 32;                             //32 is a hardware value of the gpu
 
-  __shared__ half block_a[16][64];                            //reduced accuracy but more data in L1 cache, all threds of a block share this
-  __shared__ half block_b[16][64];                            //probably introduces error compared to other programms
+  __shared__ half __align__(16) block_a[16][64];
+  __shared__ half __align__(16) block_b[16][64];                            //probably introduces error compared to other programms
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4]; //reserving storage in register for tensor cores;
                                   //m,  n,  k,  
