@@ -25,24 +25,31 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       wmma::fill_fragment(acc[r][c], 0.0f);                   //set values to 0 for initialisation
 
   for (int k = 0; k < dim_k; k += 16) {
-    __syncthreads();                                          //calculations form before are finished
-
-    // Improvement 09
-    for (int step = 0; step < 16; step += 4) {
-        int r = step + (i / 16);     // Zeilen-Zuordnung (0 bis 15)
-        int c = (i % 16) * 4;        // Spalten-Zuordnung in 4er-Blöcken
-
-        // Ein einzelner 128-Bit Ladebefehl aus dem globalen Speicher
+      __syncthreads(); 
+      
+      // 1. Matrix A laden (Vektorisiert entlang der M-Dimension)
+      for (int step = 0; step < 16; step += 4) {
+        int r = step + (i / 16);     
+        int c = (i % 16) * 4;        
         float4 vec_a = reinterpret_cast<float4*>(&d_a[(k + r) * dim_m + offset_a_m + c])[0];
-
-        // Konvertierung zu FP16 und Speicherung im schnellen Shared Memory
         block_a[r][c + 0] = __float2half(vec_a.x);
         block_a[r][c + 1] = __float2half(vec_a.y);
         block_a[r][c + 2] = __float2half(vec_a.z);
         block_a[r][c + 3] = __float2half(vec_a.w);
-        //end improvement 09
-    }
-    __syncthreads();                                          //loading the data is finished
+      }
+
+      // 2. Matrix B laden (Vektorisiert UND koalesziert entlang der K-Dimension)
+      for (int step = 0; step < 64; step += 16) {
+        int n_idx = step + (i / 4); // Spalte (N-Dimension, 0 bis 63)
+        int k_idx = (i % 4) * 4;    // Zeile (K-Dimension, 0, 4, 8, 12)
+        float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k + k_idx])[0];
+        block_b[k_idx + 0][n_idx] = __float2half(vec_b.x);
+        block_b[k_idx + 1][n_idx] = __float2half(vec_b.y);
+        block_b[k_idx + 2][n_idx] = __float2half(vec_b.z);
+        block_b[k_idx + 3][n_idx] = __float2half(vec_b.w);
+      }
+      __syncthreads(); 
+      //loading the data is finished
 
     //Improvements for 08 - not sure if really of advantage, performance almost doesn't get better
     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
