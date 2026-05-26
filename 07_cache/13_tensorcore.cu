@@ -11,7 +11,6 @@ using namespace nvcuda;
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
            float *d_a, float *d_b, float *d_c) {
 
-
   // Grid Swizzling: Umverteilung der Blöcke in 8er-Panels
   const int panel_width = 8;
   int bid = blockIdx.y * gridDim.x + blockIdx.x; 
@@ -41,16 +40,22 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
     float4 vec_a = reinterpret_cast<float4*>(&d_a[r * dim_m + offset_a_m + c])[0];
-    block_a[0][r][c + 0] = __float2half(vec_a.x);
-    block_a[0][r][c + 1] = __float2half(vec_a.y);
-    block_a[0][r][c + 2] = __float2half(vec_a.z);
-    block_a[0][r][c + 3] = __float2half(vec_a.w);
+    
+    // OPTIMIERUNG: 64-Bit Store für Matrix A
+    half2 h01 = __floats2half2_rn(vec_a.x, vec_a.y);
+    half2 h23 = __floats2half2_rn(vec_a.z, vec_a.w);
+    uint2 pack_a;
+    pack_a.x = reinterpret_cast<unsigned int&>(h01);
+    pack_a.y = reinterpret_cast<unsigned int&>(h23);
+    reinterpret_cast<uint2*>(&block_a[0][r][c])[0] = pack_a;
   }
   for (int step = 0; step < 2; ++step) {
     int logical_id = step * 128 + threadIdx.x;
     int n_idx = logical_id / 4;
     int k_idx = (logical_id % 4) * 4;
     float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k_idx])[0];
+    
+    // Matrix B behält einzelne Zuweisungen wegen Transponierung (Stride)
     block_b[0][k_idx + 0][n_idx] = __float2half(vec_b.x);
     block_b[0][k_idx + 1][n_idx] = __float2half(vec_b.y);
     block_b[0][k_idx + 2][n_idx] = __float2half(vec_b.z);
@@ -72,10 +77,14 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       int r = logical_id / 32;
       int c = (logical_id % 32) * 4;
       float4 vec_a = reinterpret_cast<float4*>(&d_a[(k + r) * dim_m + offset_a_m + c])[0];
-      block_a[write_idx][r][c + 0] = __float2half(vec_a.x);
-      block_a[write_idx][r][c + 1] = __float2half(vec_a.y);
-      block_a[write_idx][r][c + 2] = __float2half(vec_a.z);
-      block_a[write_idx][r][c + 3] = __float2half(vec_a.w);
+      
+      // OPTIMIERUNG: 64-Bit Store für Matrix A
+      half2 h01 = __floats2half2_rn(vec_a.x, vec_a.y);
+      half2 h23 = __floats2half2_rn(vec_a.z, vec_a.w);
+      uint2 pack_a;
+      pack_a.x = reinterpret_cast<unsigned int&>(h01);
+      pack_a.y = reinterpret_cast<unsigned int&>(h23);
+      reinterpret_cast<uint2*>(&block_a[write_idx][r][c])[0] = pack_a;
     }
     for (int step = 0; step < 2; ++step) {
       int logical_id = step * 128 + threadIdx.x;
@@ -265,5 +274,18 @@ int main(int argc, const char **argv) {
  * Reason: Total loss of latency hiding. Tensor Cores stalled during memory fetches.
  * * 12. Rollback to optimal config:
  * Reverted to 128 Threads, Tile 128x64, K=16 with Double Buffering.
- * Performance restored to: ~67,551 GFLOPS.
+ * Perform
+ 
+ /*
+ * 12. L2-Cache Optimization (Grid Swizzling): 
+ * Reordered block execution into 8x8 panels to maximize L2-Cache hits 
+ * and data locality for matrices A and B.
+ * Performance: ~71,412 GFLOPS.
+ */
+
+ /*
+ * 13. Vectorized 64-bit Shared Memory Stores: 
+ * Replaced single 16-bit conversions and stores for Matrix A with 
+ * hardware-accelerated __floats2half2_rn and 64-bit (uint2) vector stores.
+ * Performance: [Bitte aktuelle GFLOPS eintragen]
  */
