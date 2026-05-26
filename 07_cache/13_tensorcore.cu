@@ -15,8 +15,9 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int i = threadIdx.x;
   int warp_id = threadIdx.x / 32;                             //32 is a hardware value of the gpu
 
-  __shared__ half __align__(16) block_a[16][64];
-  __shared__ half __align__(16) block_b[16][64];                            //probably introduces error compared to other programms
+  // +8 verschiebt die Speicheradressen und löst die Bank Conflicts auf
+  __shared__ half __align__(16) block_a[16][64 + 8]; 
+  __shared__ half __align__(16) block_b[16][64 + 8];                          //probably introduces error compared to other programms
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4]; //reserving storage in register for tensor cores;
                                   //m,  n,  k,  
@@ -57,11 +58,13 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
     for (int r = 0; r < 2; r++) {
       int row_tile = warp_id * 2 + r;
-      wmma::load_matrix_sync(a_frag[r], &block_a[0][row_tile * 16], 64);
+      // Die 72 am Ende sagt dem Tensor Core: "Die nächste Zeile beginnt 72 Schritte weiter"
+      wmma::load_matrix_sync(a_frag[r], &block_a[0][row_tile * 16], 72); 
     }
 
     for (int c = 0; c < 4; c++) {
-      wmma::load_matrix_sync(b_frag[c], &block_b[0][c * 16], 64);
+      // Auch hier die 72 eintragen
+      wmma::load_matrix_sync(b_frag[c], &block_b[0][c * 16], 72);
     }
 
     for (int r = 0; r < 2; r++) {
