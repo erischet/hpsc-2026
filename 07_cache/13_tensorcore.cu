@@ -1,13 +1,3 @@
-#include <iostream>
-#include <typeinfo>
-#include <random>
-#include <stdint.h>
-#include <cublas_v2.h>
-#include <mma.h>
-#include <chrono>
-using namespace std;
-using namespace nvcuda;
-
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
            float *d_a, float *d_b, float *d_c) {
 
@@ -29,8 +19,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int warp_col = warp_id / 4;
 
   extern __shared__ half smem[];
-  half (*block_a)[16][136] = reinterpret_cast<half (*)[16][136]>(smem);
-  half (*block_b)[16][136] = reinterpret_cast<half (*)[16][136]>(smem + (3 * 16 * 136));
+  half (*block_a)[32][136] = reinterpret_cast<half (*)[32][136]>(smem);
+  half (*block_b)[32][136] = reinterpret_cast<half (*)[32][136]>(smem + (3 * 32 * 136));
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   #pragma unroll
@@ -41,7 +31,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   // Prologue: Load Stage 0 (k = 0)
   #pragma unroll
-  for (int step = 0; step < 2; ++step) {
+  for (int step = 0; step < 4; ++step) {
     int logical_id = step * 256 + threadIdx.x;
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
@@ -52,7 +42,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     block_a[0][r][c + 3] = __float2half(vec_a.w);
   }
   #pragma unroll
-  for (int step = 0; step < 2; ++step) {
+  for (int step = 0; step < 4; ++step) {
     int logical_id = step * 256 + threadIdx.x;
     int n_idx = logical_id / 4;
     int k_idx = (logical_id % 4) * 4;
@@ -63,25 +53,25 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     block_b[0][k_idx + 3][n_idx] = __float2half(vec_b.w);
   }
 
-  // Prologue: Load Stage 1 (k = 16)
-  if (16 < dim_k) {
+  // Prologue: Load Stage 1 (k = 32)
+  if (32 < dim_k) {
     #pragma unroll
-    for (int step = 0; step < 2; ++step) {
+    for (int step = 0; step < 4; ++step) {
       int logical_id = step * 256 + threadIdx.x;
       int r = logical_id / 32;
       int c = (logical_id % 32) * 4;
-      float4 vec_a = reinterpret_cast<float4*>(&d_a[(16 + r) * dim_m + offset_a_m + c])[0];
+      float4 vec_a = reinterpret_cast<float4*>(&d_a[(32 + r) * dim_m + offset_a_m + c])[0];
       block_a[1][r][c + 0] = __float2half(vec_a.x);
       block_a[1][r][c + 1] = __float2half(vec_a.y);
       block_a[1][r][c + 2] = __float2half(vec_a.z);
       block_a[1][r][c + 3] = __float2half(vec_a.w);
     }
     #pragma unroll
-    for (int step = 0; step < 2; ++step) {
+    for (int step = 0; step < 4; ++step) {
       int logical_id = step * 256 + threadIdx.x;
       int n_idx = logical_id / 4;
       int k_idx = (logical_id % 4) * 4;
-      float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 16 + k_idx])[0];
+      float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 32 + k_idx])[0];
       block_b[1][k_idx + 0][n_idx] = __float2half(vec_b.x);
       block_b[1][k_idx + 1][n_idx] = __float2half(vec_b.y);
       block_b[1][k_idx + 2][n_idx] = __float2half(vec_b.z);
@@ -94,14 +84,14 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag[4];
 
   // Main Loop
-  for (int k = 0; k < dim_k; k += 16) {
-    int next_k = k + 32;
-    int write_idx = ((k / 16) + 2) % 3;
-    int read_idx = (k / 16) % 3;
+  for (int k = 0; k < dim_k; k += 32) {
+    int next_k = k + 64;
+    int write_idx = ((k / 32) + 2) % 3;
+    int read_idx = (k / 32) % 3;
 
     if (next_k < dim_k) {
       #pragma unroll
-      for (int step = 0; step < 2; ++step) {
+      for (int step = 0; step < 4; ++step) {
         int logical_id = step * 256 + threadIdx.x;
         int r = logical_id / 32;
         int c = (logical_id % 32) * 4;
@@ -112,7 +102,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
         block_a[write_idx][r][c + 3] = __float2half(vec_a.w);
       }
       #pragma unroll
-      for (int step = 0; step < 2; ++step) {
+      for (int step = 0; step < 4; ++step) {
         int logical_id = step * 256 + threadIdx.x;
         int n_idx = logical_id / 4;
         int k_idx = (logical_id % 4) * 4;
@@ -125,20 +115,23 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     }
 
     #pragma unroll
-    for (int r = 0; r < 2; r++) {
-      int row_tile = warp_row * 2 + r;
-      wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
-    }
-    #pragma unroll
-    for (int c = 0; c < 4; c++) {
-      int col_tile = warp_col * 4 + c;
-      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][col_tile * 16], 136);
-    }
-    #pragma unroll
-    for (int r = 0; r < 2; r++) {
+    for (int k_step = 0; k_step < 32; k_step += 16) {
+      #pragma unroll
+      for (int r = 0; r < 2; r++) {
+        int row_tile = warp_row * 2 + r;
+        wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][k_step][row_tile * 16], 136);
+      }
       #pragma unroll
       for (int c = 0; c < 4; c++) {
-        wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
+        int col_tile = warp_col * 4 + c;
+        wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][k_step][col_tile * 16], 136);
+      }
+      #pragma unroll
+      for (int r = 0; r < 2; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+          wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
+        }
       }
     }
     __syncthreads();
@@ -302,7 +295,6 @@ int main(int argc, const char **argv) {
  * 13. 3-Stage Software Pipeline: 
  * Utilize 3 stage buffering (instead of Double Buffering)
  */
-
  /*
  * 14. 3-Stage Software Pipeline Analysis:
  * Implemented 3-stage buffering to further hide global memory latency.
