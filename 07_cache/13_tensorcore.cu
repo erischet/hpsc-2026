@@ -28,8 +28,9 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int warp_row = warp_id % 4;
   int warp_col = warp_id / 4;
 
-  __shared__ half __align__(16) block_a[3][16][136]; 
-  __shared__ half __align__(16) block_b[3][16][136];
+  extern __shared__ half smem[];
+  half (*block_a)[16][136] = reinterpret_cast<half (*)[16][136]>(smem);
+  half (*block_b)[16][136] = reinterpret_cast<half (*)[16][136]>(smem + (3 * 16 * 136));
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   #pragma unroll
@@ -208,9 +209,14 @@ int main(int argc, const char **argv) {
   dim3 block = dim3(256);
   dim3 grid = dim3((m + tile_m - 1) / tile_m, (n + tile_n - 1) / tile_n);
   
+  // Dynamische Shared-Memory-Größe berechnen und Attribut setzen
+  int smem_size = (3 * 16 * 136 + 3 * 16 * 136) * sizeof(half);
+  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
   for (int i = 0; i < Nt+2; i++) {
     if (i == 2) tic = chrono::steady_clock::now();
-    kernel<<< grid, block >>>(m,
+    // smem_size im Kernel-Aufruf übergeben
+    kernel<<< grid, block, smem_size >>>(m,
             n,
             k,
             A,
@@ -295,4 +301,11 @@ int main(int argc, const char **argv) {
  *
  * 13. 3-Stage Software Pipeline: 
  * Utilize 3 stage buffering (instead of Double Buffering)
+ */
+
+ /*
+ * 14. 3-Stage Software Pipeline Analysis:
+ * Implemented 3-stage buffering to further hide global memory latency.
+ * Result: Performance remained stagnant, with a slight decrease compared to the previous double-buffering baseline. 
+ * Insight: The overhead introduced by complex staging and additional pointer arithmetic, combined with potential register pressure from the larger buffer structure, negated the theoretical latency hiding benefits. Furthermore, attempts at manual vectorized type conversion proved ineffective, as they introduced additional instruction overhead and disrupted optimal cache alignment.
  */
