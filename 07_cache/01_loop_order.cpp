@@ -13,7 +13,7 @@ void matmult(matrix &A, matrix &B, matrix &C, int N) {
 }
 
 int main() {
-  const int N = 2048;
+  const int N = 1024;
   matrix A(N,vector<float>(N));
   matrix B(N,vector<float>(N));
   matrix C(N,vector<float>(N));

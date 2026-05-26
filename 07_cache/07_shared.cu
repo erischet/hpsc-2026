@@ -3,8 +3,10 @@
 #include <random>
 #include <stdint.h>
 #include <cublas_v2.h>
+
 #include <chrono>
 using namespace std;
+
 
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
 		       float *d_a, float *d_b, float *d_c) {
@@ -20,6 +22,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   for (int n = 0; n < 64; ++n)
     block_c[n] = 0;
 
+    
   for (int k = 0; k < dim_k; k += 8) {
     int offset_a_k = k, offset_b_k = k;
     __syncthreads();
@@ -90,6 +93,8 @@ int main(int argc, const char **argv) {
   int64_t num_flops = (2 * int64_t(m) * int64_t(n) * int64_t(k)) + (2 * int64_t(m) * int64_t(n));
   double tcublas = chrono::duration<double>(toc - tic).count() / Nt;
   double cublas_flops = double(num_flops) / tcublas / 1.0e9;
+  
+  //own implementation starts here
   int tile = 64;
   dim3 block = dim3(tile);
   dim3 grid = dim3((m+tile-1)/tile, (n+tile-1)/tile);
