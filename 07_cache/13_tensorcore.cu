@@ -8,9 +8,6 @@
 using namespace std;
 using namespace nvcuda;
 
-//track of improvements: 
-//
-
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
            float *d_a, float *d_b, float *d_c) {
   int offset_a_m = 128 * blockIdx.x;
@@ -117,32 +114,6 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       for (int c = 0; c < 4; c++) {
         wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
       }
-    }
-  }
-
-  // Zurückschreiben in C
-  for (int r = 0; r < 2; r++) {
-    for (int c = 0; c < 4; c++) {
-      int c_m = offset_a_m + (warp_id * 2 + r) * 16;
-      int c_n = offset_b_n + c * 16;
-      if (c_n < dim_n && c_m < dim_m)
-        wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m], acc[r][c], dim_m, wmma::mem_col_major);
-    }
-  }
-}
-
-  // Epilog: Letzte geladene Kachel berechnen
-  int read_idx = write_idx;
-  for (int r = 0; r < 2; r++) {
-    int row_tile = warp_id * 2 + r;
-    wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
-  }
-  for (int c = 0; c < 4; c++) {
-    wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
-  }
-  for (int r = 0; r < 2; r++) {
-    for (int c = 0; c < 4; c++) {
-      wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
     }
   }
 
