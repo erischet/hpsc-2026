@@ -201,5 +201,7 @@ int main(int argc, const char **argv) {
  * Performance:  58874.55 Gflops
  */
 
-* * 10. Rollback to optimal config:
+ /*
+ * 10. Rollback to optimal config:
  * Reverted to K=16 with Double Buffering.
+*/
