@@ -11,7 +11,6 @@ using namespace nvcuda;
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
            float *d_a, float *d_b, float *d_c) {
 
-
   // Grid Swizzling: Umverteilung der Blöcke in 8er-Panels
   const int panel_width = 8;
   int bid = blockIdx.y * gridDim.x + blockIdx.x; 
@@ -32,10 +31,13 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   __shared__ half __align__(16) block_b[2][16][72];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
+  #pragma unroll
   for (int r = 0; r < 2; r++)
+    #pragma unroll
     for (int c = 0; c < 4; c++)
       wmma::fill_fragment(acc[r][c], 0.0f);
 
+  #pragma unroll
   for (int step = 0; step < 4; ++step) {
     int logical_id = step * 128 + threadIdx.x;
     int r = logical_id / 32;
@@ -46,6 +48,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     block_a[0][r][c + 2] = __float2half(vec_a.z);
     block_a[0][r][c + 3] = __float2half(vec_a.w);
   }
+  #pragma unroll
   for (int step = 0; step < 2; ++step) {
     int logical_id = step * 128 + threadIdx.x;
     int n_idx = logical_id / 4;
@@ -67,6 +70,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     write_idx = 1 - write_idx;
     int read_idx = 1 - write_idx;
 
+    #pragma unroll
     for (int step = 0; step < 4; ++step) {
       int logical_id = step * 128 + threadIdx.x;
       int r = logical_id / 32;
@@ -77,6 +81,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       block_a[write_idx][r][c + 2] = __float2half(vec_a.z);
       block_a[write_idx][r][c + 3] = __float2half(vec_a.w);
     }
+    #pragma unroll
     for (int step = 0; step < 2; ++step) {
       int logical_id = step * 128 + threadIdx.x;
       int n_idx = logical_id / 4;
@@ -88,14 +93,18 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       block_b[write_idx][k_idx + 3][n_idx] = __float2half(vec_b.w);
     }
 
+    #pragma unroll
     for (int r = 0; r < 2; r++) {
       int row_tile = warp_id * 2 + r;
       wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
     }
+    #pragma unroll
     for (int c = 0; c < 4; c++) {
       wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
     }
+    #pragma unroll
     for (int r = 0; r < 2; r++) {
+      #pragma unroll
       for (int c = 0; c < 4; c++) {
         wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
       }
@@ -104,20 +113,26 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   }
 
   int read_idx = write_idx;
+  #pragma unroll
   for (int r = 0; r < 2; r++) {
     int row_tile = warp_id * 2 + r;
     wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
   }
+  #pragma unroll
   for (int c = 0; c < 4; c++) {
     wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
   }
+  #pragma unroll
   for (int r = 0; r < 2; r++) {
+    #pragma unroll
     for (int c = 0; c < 4; c++) {
       wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
     }
   }
 
+  #pragma unroll
   for (int r = 0; r < 2; r++) {
+    #pragma unroll
     for (int c = 0; c < 4; c++) {
       int c_m = offset_a_m + (warp_id * 2 + r) * 16;
       int c_n = offset_b_n + c * 16;
