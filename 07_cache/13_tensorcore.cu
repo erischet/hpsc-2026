@@ -5,6 +5,7 @@
 #include <cublas_v2.h>
 #include <mma.h>
 #include <chrono>
+#include <cuda_fp16.h>
 using namespace std;
 using namespace nvcuda;
 
@@ -44,10 +45,9 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
     float4 vec_a = reinterpret_cast<float4*>(&d_a[r * dim_m + offset_a_m + c])[0];
-    block_a[0][r][c + 0] = __float2half(vec_a.x);
-    block_a[0][r][c + 1] = __float2half(vec_a.y);
-    block_a[0][r][c + 2] = __float2half(vec_a.z);
-    block_a[0][r][c + 3] = __float2half(vec_a.w);
+    half2* a_ptr = reinterpret_cast<half2*>(&block_a[0][r][c]);
+    a_ptr[0] = __floats2half2_rn(vec_a.x, vec_a.y);
+    a_ptr[1] = __floats2half2_rn(vec_a.z, vec_a.w);
   }
   #pragma unroll
   for (int step = 0; step < 2; ++step) {
@@ -55,10 +55,12 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     int n_idx = logical_id / 4;
     int k_idx = (logical_id % 4) * 4;
     float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k_idx])[0];
-    block_b[0][k_idx + 0][n_idx] = __float2half(vec_b.x);
-    block_b[0][k_idx + 1][n_idx] = __float2half(vec_b.y);
-    block_b[0][k_idx + 2][n_idx] = __float2half(vec_b.z);
-    block_b[0][k_idx + 3][n_idx] = __float2half(vec_b.w);
+    half2 hb_01 = __floats2half2_rn(vec_b.x, vec_b.y);
+    half2 hb_23 = __floats2half2_rn(vec_b.z, vec_b.w);
+    block_b[0][k_idx + 0][n_idx] = __low2half(hb_01);
+    block_b[0][k_idx + 1][n_idx] = __high2half(hb_01);
+    block_b[0][k_idx + 2][n_idx] = __low2half(hb_23);
+    block_b[0][k_idx + 3][n_idx] = __high2half(hb_23);
   }
   __syncthreads();
 
@@ -77,10 +79,9 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       int r = logical_id / 32;
       int c = (logical_id % 32) * 4;
       float4 vec_a = reinterpret_cast<float4*>(&d_a[(k + r) * dim_m + offset_a_m + c])[0];
-      block_a[write_idx][r][c + 0] = __float2half(vec_a.x);
-      block_a[write_idx][r][c + 1] = __float2half(vec_a.y);
-      block_a[write_idx][r][c + 2] = __float2half(vec_a.z);
-      block_a[write_idx][r][c + 3] = __float2half(vec_a.w);
+      half2* a_ptr = reinterpret_cast<half2*>(&block_a[write_idx][r][c]);
+      a_ptr[0] = __floats2half2_rn(vec_a.x, vec_a.y);
+      a_ptr[1] = __floats2half2_rn(vec_a.z, vec_a.w);
     }
     #pragma unroll
     for (int step = 0; step < 2; ++step) {
@@ -88,10 +89,12 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       int n_idx = logical_id / 4;
       int k_idx = (logical_id % 4) * 4;
       float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k + k_idx])[0];
-      block_b[write_idx][k_idx + 0][n_idx] = __float2half(vec_b.x);
-      block_b[write_idx][k_idx + 1][n_idx] = __float2half(vec_b.y);
-      block_b[write_idx][k_idx + 2][n_idx] = __float2half(vec_b.z);
-      block_b[write_idx][k_idx + 3][n_idx] = __float2half(vec_b.w);
+      half2 hb_01 = __floats2half2_rn(vec_b.x, vec_b.y);
+      half2 hb_23 = __floats2half2_rn(vec_b.z, vec_b.w);
+      block_b[write_idx][k_idx + 0][n_idx] = __low2half(hb_01);
+      block_b[write_idx][k_idx + 1][n_idx] = __high2half(hb_01);
+      block_b[write_idx][k_idx + 2][n_idx] = __low2half(hb_23);
+      block_b[write_idx][k_idx + 3][n_idx] = __high2half(hb_23);
     }
 
     #pragma unroll
