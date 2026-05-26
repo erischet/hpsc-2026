@@ -29,6 +29,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       block_a[j][i] = d_a[(offset_a_k + j) * dim_m + offset_a_m + i];
       block_b[j][i] = d_b[(offset_b_n + i) * dim_k + offset_b_k + j];
     }
+
+
     __syncthreads();
 #pragma unroll
     for (int j = 0; j < 8; ++j) {

@@ -32,17 +32,27 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     }
     __syncthreads();                                          //loading the data is finished
 
+    //Improvements for 08
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag[4];
+
     for (int r = 0; r < 2; r++) {
       int row_tile = warp_id * 2 + r;
-      wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
-      wmma::load_matrix_sync(a_frag, &block_a[0][row_tile * 16], 64);
+      wmma::load_matrix_sync(a_frag[r], &block_a[0][row_tile * 16], 64);
+    }
+
+    for (int c = 0; c < 4; c++) {
+      wmma::load_matrix_sync(b_frag[c], &block_b[0][c * 16], 64);
+    }
+
+    for (int r = 0; r < 2; r++) {
       for (int c = 0; c < 4; c++) {
-        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-        wmma::load_matrix_sync(b_frag, &block_b[0][c * 16], 64);
-        wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
+        wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
       }
     }
   }
+  //end improvement 08S
+
   for (int r = 0; r < 2; r++) {
     for (int c = 0; c < 4; c++) {
       int c_m = offset_a_m + (warp_id * 2 + r) * 16;
