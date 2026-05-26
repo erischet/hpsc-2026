@@ -5,7 +5,6 @@
 #include <cublas_v2.h>
 #include <mma.h>
 #include <chrono>
-#include <cuda_fp16.h>
 using namespace std;
 using namespace nvcuda;
 
@@ -29,8 +28,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int warp_row = warp_id % 4;
   int warp_col = warp_id / 4;
 
-  __shared__ half __align__(16) block_a[2][16][136]; 
-  __shared__ half __align__(16) block_b[2][16][136];
+  __shared__ half __align__(16) block_a[3][16][136]; 
+  __shared__ half __align__(16) block_b[3][16][136];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   #pragma unroll
@@ -39,62 +38,89 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     for (int c = 0; c < 4; c++)
       wmma::fill_fragment(acc[r][c], 0.0f);
 
+  // Prologue: Load Stage 0 (k = 0)
   #pragma unroll
   for (int step = 0; step < 2; ++step) {
     int logical_id = step * 256 + threadIdx.x;
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
-    float4 vec_a = reinterpret_cast<float4*>(&d_a[r * dim_m + offset_a_m + c])[0];
-    half2* a_ptr = reinterpret_cast<half2*>(&block_a[0][r][c]);
-    a_ptr[0] = __floats2half2_rn(vec_a.x, vec_a.y);
-    a_ptr[1] = __floats2half2_rn(vec_a.z, vec_a.w);
+    float4 vec_a = reinterpret_cast<float4*>(&d_a[(0 + r) * dim_m + offset_a_m + c])[0];
+    block_a[0][r][c + 0] = __float2half(vec_a.x);
+    block_a[0][r][c + 1] = __float2half(vec_a.y);
+    block_a[0][r][c + 2] = __float2half(vec_a.z);
+    block_a[0][r][c + 3] = __float2half(vec_a.w);
   }
   #pragma unroll
   for (int step = 0; step < 2; ++step) {
     int logical_id = step * 256 + threadIdx.x;
     int n_idx = logical_id / 4;
     int k_idx = (logical_id % 4) * 4;
-    float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k_idx])[0];
-    half2 hb_01 = __floats2half2_rn(vec_b.x, vec_b.y);
-    half2 hb_23 = __floats2half2_rn(vec_b.z, vec_b.w);
-    block_b[0][k_idx + 0][n_idx] = __low2half(hb_01);
-    block_b[0][k_idx + 1][n_idx] = __high2half(hb_01);
-    block_b[0][k_idx + 2][n_idx] = __low2half(hb_23);
-    block_b[0][k_idx + 3][n_idx] = __high2half(hb_23);
+    float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 0 + k_idx])[0];
+    block_b[0][k_idx + 0][n_idx] = __float2half(vec_b.x);
+    block_b[0][k_idx + 1][n_idx] = __float2half(vec_b.y);
+    block_b[0][k_idx + 2][n_idx] = __float2half(vec_b.z);
+    block_b[0][k_idx + 3][n_idx] = __float2half(vec_b.w);
   }
-  __syncthreads();
 
-  wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
-  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag[4];
-
-  int write_idx = 0;
-  
-  for (int k = 16; k < dim_k; k += 16) {
-    write_idx = 1 - write_idx;
-    int read_idx = 1 - write_idx;
-
+  // Prologue: Load Stage 1 (k = 16)
+  if (16 < dim_k) {
     #pragma unroll
     for (int step = 0; step < 2; ++step) {
       int logical_id = step * 256 + threadIdx.x;
       int r = logical_id / 32;
       int c = (logical_id % 32) * 4;
-      float4 vec_a = reinterpret_cast<float4*>(&d_a[(k + r) * dim_m + offset_a_m + c])[0];
-      half2* a_ptr = reinterpret_cast<half2*>(&block_a[write_idx][r][c]);
-      a_ptr[0] = __floats2half2_rn(vec_a.x, vec_a.y);
-      a_ptr[1] = __floats2half2_rn(vec_a.z, vec_a.w);
+      float4 vec_a = reinterpret_cast<float4*>(&d_a[(16 + r) * dim_m + offset_a_m + c])[0];
+      block_a[1][r][c + 0] = __float2half(vec_a.x);
+      block_a[1][r][c + 1] = __float2half(vec_a.y);
+      block_a[1][r][c + 2] = __float2half(vec_a.z);
+      block_a[1][r][c + 3] = __float2half(vec_a.w);
     }
     #pragma unroll
     for (int step = 0; step < 2; ++step) {
       int logical_id = step * 256 + threadIdx.x;
       int n_idx = logical_id / 4;
       int k_idx = (logical_id % 4) * 4;
-      float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k + k_idx])[0];
-      half2 hb_01 = __floats2half2_rn(vec_b.x, vec_b.y);
-      half2 hb_23 = __floats2half2_rn(vec_b.z, vec_b.w);
-      block_b[write_idx][k_idx + 0][n_idx] = __low2half(hb_01);
-      block_b[write_idx][k_idx + 1][n_idx] = __high2half(hb_01);
-      block_b[write_idx][k_idx + 2][n_idx] = __low2half(hb_23);
-      block_b[write_idx][k_idx + 3][n_idx] = __high2half(hb_23);
+      float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 16 + k_idx])[0];
+      block_b[1][k_idx + 0][n_idx] = __float2half(vec_b.x);
+      block_b[1][k_idx + 1][n_idx] = __float2half(vec_b.y);
+      block_b[1][k_idx + 2][n_idx] = __float2half(vec_b.z);
+      block_b[1][k_idx + 3][n_idx] = __float2half(vec_b.w);
+    }
+  }
+  __syncthreads();
+
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag[4];
+
+  // Main Loop
+  for (int k = 0; k < dim_k; k += 16) {
+    int next_k = k + 32;
+    int write_idx = ((k / 16) + 2) % 3;
+    int read_idx = (k / 16) % 3;
+
+    if (next_k < dim_k) {
+      #pragma unroll
+      for (int step = 0; step < 2; ++step) {
+        int logical_id = step * 256 + threadIdx.x;
+        int r = logical_id / 32;
+        int c = (logical_id % 32) * 4;
+        float4 vec_a = reinterpret_cast<float4*>(&d_a[(next_k + r) * dim_m + offset_a_m + c])[0];
+        block_a[write_idx][r][c + 0] = __float2half(vec_a.x);
+        block_a[write_idx][r][c + 1] = __float2half(vec_a.y);
+        block_a[write_idx][r][c + 2] = __float2half(vec_a.z);
+        block_a[write_idx][r][c + 3] = __float2half(vec_a.w);
+      }
+      #pragma unroll
+      for (int step = 0; step < 2; ++step) {
+        int logical_id = step * 256 + threadIdx.x;
+        int n_idx = logical_id / 4;
+        int k_idx = (logical_id % 4) * 4;
+        float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + next_k + k_idx])[0];
+        block_b[write_idx][k_idx + 0][n_idx] = __float2half(vec_b.x);
+        block_b[write_idx][k_idx + 1][n_idx] = __float2half(vec_b.y);
+        block_b[write_idx][k_idx + 2][n_idx] = __float2half(vec_b.z);
+        block_b[write_idx][k_idx + 3][n_idx] = __float2half(vec_b.w);
+      }
     }
 
     #pragma unroll
@@ -117,25 +143,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     __syncthreads();
   }
 
-  int read_idx = write_idx;
-  #pragma unroll
-  for (int r = 0; r < 2; r++) {
-    int row_tile = warp_row * 2 + r;
-    wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
-  }
-  #pragma unroll
-  for (int c = 0; c < 4; c++) {
-    int col_tile = warp_col * 4 + c;
-    wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][col_tile * 16], 136);
-  }
-  #pragma unroll
-  for (int r = 0; r < 2; r++) {
-    #pragma unroll
-    for (int c = 0; c < 4; c++) {
-      wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
-    }
-  }
-
+  // Epilogue
   #pragma unroll
   for (int r = 0; r < 2; r++) {
     #pragma unroll
@@ -195,7 +203,6 @@ int main(int argc, const char **argv) {
   double tcublas = chrono::duration<double>(toc - tic).count() / Nt;
   double cublas_flops = double(num_flops) / tcublas / 1.0e9;
 
-  // Anpassung für 256 Threads
   int tile_m = 128;
   int tile_n = 128;
   dim3 block = dim3(256);
@@ -267,27 +274,25 @@ int main(int argc, const char **argv) {
  * 8. Double Buffering: 
  * Implemented ping-pong buffers to hide global memory latency.
  * Performance: ~67,551 GFLOPS.
- */
-
- /*
+ *
  * 9. K-Dimension Scaling (K=32): 
  * Increased K-Tile size from 16 to 32.
  * Doubled arithmetic intensity by feeding 32 elements to Tensor Cores per loop.
  * Retained 128 threads and optimal register count.
  * Performance:  58874.55 Gflops
- */
-
- /*
+ *
  * 10. Rollback to optimal config:
  * Reverted to K=16 with Double Buffering.
-*/
-
-/*
+ *
  * 11. K-Dimension without Double Buffering: 
  * Tested K=32 with Single Buffering.
  * Performance: Dropped to ~34,269 GFLOPS.
  * Reason: Total loss of latency hiding. Tensor Cores stalled during memory fetches.
- * * 12. Rollback to optimal config:
+ *
+ * 12. Rollback to optimal config:
  * Reverted to 128 Threads, Tile 128x64, K=16 with Double Buffering.
  * Performance restored to: ~67,551 GFLOPS.
+ *
+ * 13. 3-Stage Software Pipeline: 
+ * Utilize 3 stage buffering (instead of Double Buffering)
  */
