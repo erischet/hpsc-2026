@@ -11,7 +11,6 @@ using namespace nvcuda;
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
            float *d_a, float *d_b, float *d_c) {
 
-  // Grid Swizzling: Umverteilung der Blöcke in 8er-Panels
   const int panel_width = 8;
   int bid = blockIdx.y * gridDim.x + blockIdx.x; 
   
@@ -24,11 +23,13 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   if (new_blockIdx_x >= gridDim.x || new_blockIdx_y >= gridDim.y) return;
 
   int offset_a_m = 128 * new_blockIdx_x;
-  int offset_b_n = 64 * new_blockIdx_y;
+  int offset_b_n = 128 * new_blockIdx_y;
   int warp_id = threadIdx.x / 32;
+  int warp_row = warp_id % 4;
+  int warp_col = warp_id / 4;
 
   __shared__ half __align__(16) block_a[2][16][136]; 
-  __shared__ half __align__(16) block_b[2][16][72];
+  __shared__ half __align__(16) block_b[2][16][136];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   #pragma unroll
@@ -38,8 +39,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       wmma::fill_fragment(acc[r][c], 0.0f);
 
   #pragma unroll
-  for (int step = 0; step < 4; ++step) {
-    int logical_id = step * 128 + threadIdx.x;
+  for (int step = 0; step < 2; ++step) {
+    int logical_id = step * 256 + threadIdx.x;
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
     float4 vec_a = reinterpret_cast<float4*>(&d_a[r * dim_m + offset_a_m + c])[0];
@@ -50,7 +51,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   }
   #pragma unroll
   for (int step = 0; step < 2; ++step) {
-    int logical_id = step * 128 + threadIdx.x;
+    int logical_id = step * 256 + threadIdx.x;
     int n_idx = logical_id / 4;
     int k_idx = (logical_id % 4) * 4;
     float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k_idx])[0];
@@ -71,8 +72,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     int read_idx = 1 - write_idx;
 
     #pragma unroll
-    for (int step = 0; step < 4; ++step) {
-      int logical_id = step * 128 + threadIdx.x;
+    for (int step = 0; step < 2; ++step) {
+      int logical_id = step * 256 + threadIdx.x;
       int r = logical_id / 32;
       int c = (logical_id % 32) * 4;
       float4 vec_a = reinterpret_cast<float4*>(&d_a[(k + r) * dim_m + offset_a_m + c])[0];
@@ -83,7 +84,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     }
     #pragma unroll
     for (int step = 0; step < 2; ++step) {
-      int logical_id = step * 128 + threadIdx.x;
+      int logical_id = step * 256 + threadIdx.x;
       int n_idx = logical_id / 4;
       int k_idx = (logical_id % 4) * 4;
       float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k + k_idx])[0];
@@ -95,12 +96,13 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
     #pragma unroll
     for (int r = 0; r < 2; r++) {
-      int row_tile = warp_id * 2 + r;
+      int row_tile = warp_row * 2 + r;
       wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
     }
     #pragma unroll
     for (int c = 0; c < 4; c++) {
-      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
+      int col_tile = warp_col * 4 + c;
+      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][col_tile * 16], 136);
     }
     #pragma unroll
     for (int r = 0; r < 2; r++) {
@@ -115,12 +117,13 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int read_idx = write_idx;
   #pragma unroll
   for (int r = 0; r < 2; r++) {
-    int row_tile = warp_id * 2 + r;
+    int row_tile = warp_row * 2 + r;
     wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
   }
   #pragma unroll
   for (int c = 0; c < 4; c++) {
-    wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
+    int col_tile = warp_col * 4 + c;
+    wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][col_tile * 16], 136);
   }
   #pragma unroll
   for (int r = 0; r < 2; r++) {
@@ -134,8 +137,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   for (int r = 0; r < 2; r++) {
     #pragma unroll
     for (int c = 0; c < 4; c++) {
-      int c_m = offset_a_m + (warp_id * 2 + r) * 16;
-      int c_n = offset_b_n + c * 16;
+      int c_m = offset_a_m + (warp_row * 2 + r) * 16;
+      int c_n = offset_b_n + (warp_col * 4 + c) * 16;
       if (c_n < dim_n && c_m < dim_m)
         wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m], acc[r][c], dim_m, wmma::mem_col_major);
     }
@@ -143,18 +146,18 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 }
 
 int main(int argc, const char **argv) {
-  int m = 10240;                                          //rows of A and rows C
-  int k = 4096;                                           //collums of A and rows of B
-  int n = 8192;                                           //collums of B and collums of C
-  float alpha = 1.0;                                      //For generalizes matrix multiplicaton
+  int m = 10240;
+  int k = 4096;
+  int n = 8192;
+  float alpha = 1.0;
   float beta = 0.0;
-  int Nt = 10;                                            //iterations for the kernal to average results over some runs
-  float *A, *B, *C, *C2;                                  //C2 as a reference to look for errors; All stored as pointers
-  cudaMallocManaged(&A, m * k * sizeof(float));           //create unified memory that can be accessed for GPU and CPU
+  int Nt = 10;
+  float *A, *B, *C, *C2;
+  cudaMallocManaged(&A, m * k * sizeof(float));
   cudaMallocManaged(&B, k * n * sizeof(float));
   cudaMallocManaged(&C, m * n * sizeof(float));
   cudaMallocManaged(&C2, m * n * sizeof(float));
-  for (int i=0; i<m; i++)                                 //filling all the matracies; initialize C to 0
+  for (int i=0; i<m; i++)
     for (int j=0; j<k; j++)
       A[k*i+j] = drand48();
   for (int i=0; i<k; i++)
@@ -163,24 +166,25 @@ int main(int argc, const char **argv) {
   for (int i=0; i<n; i++)
     for (int j=0; j<m; j++)
       C[m*i+j] = C2[m*i+j] = 0;
+  
   cublasHandle_t cublas_handle;
-  cublasCreate(&cublas_handle);                           //internal cublas stuff to deal with hardware recourses
-  auto tic = chrono::steady_clock::now();                 //Probably not necessary
-  for (int i = 0; i < Nt+2; i++) {                        //warm up
+  cublasCreate(&cublas_handle);
+  auto tic = chrono::steady_clock::now();
+  for (int i = 0; i < Nt+2; i++) {
     if (i == 2) tic = chrono::steady_clock::now();
-    cublasGemmEx(cublas_handle,                           //as defined above
-		 CUBLAS_OP_N,                                         //no transpose
-		 CUBLAS_OP_N,
-		 m,                                                   //sizes of matracies
-		 n,
-		 k,
-		 &alpha,                                              //requires pointers because of fortran background
-		 A, CUDA_R_32F, m,                                    //pointer, data-type & lengh of rows
-		 B, CUDA_R_32F, k,
-		 &beta,
-		 C, CUDA_R_32F, m,
-		 CUBLAS_COMPUTE_32F_FAST_16F,
-		 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+    cublasGemmEx(cublas_handle,
+     CUBLAS_OP_N,
+     CUBLAS_OP_N,
+     m,
+     n,
+     k,
+     &alpha,
+     A, CUDA_R_32F, m,
+     B, CUDA_R_32F, k,
+     &beta,
+     C, CUDA_R_32F, m,
+     CUBLAS_COMPUTE_32F_FAST_16F,
+     CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     cudaDeviceSynchronize();
   }
   auto toc = chrono::steady_clock::now();
@@ -188,33 +192,35 @@ int main(int argc, const char **argv) {
   double tcublas = chrono::duration<double>(toc - tic).count() / Nt;
   double cublas_flops = double(num_flops) / tcublas / 1.0e9;
 
-  //own implementation starts here
+  // Anpassung für 256 Threads
   int tile_m = 128;
-  int tile_n = 64;                
-  //dim3 helps with threadIdx.x and y (optional z) later          
-  dim3 block = dim3(tile_m);                                                //comment might be outdated: amount of threads started in GPU = 64; do not use all to: don't overfloat L1 cache, apparently some kind of sweet spot
-  dim3 grid = dim3((m + tile_m - 1) / tile_m, (n + tile_n - 1) / tile_n);   //amount of blocks started in GPU, dim 0 and 1 get multiplied
+  int tile_n = 128;
+  dim3 block = dim3(256);
+  dim3 grid = dim3((m + tile_m - 1) / tile_m, (n + tile_n - 1) / tile_n);
+  
   for (int i = 0; i < Nt+2; i++) {
-    if (i == 2) tic = chrono::steady_clock::now();      //warmup again
-    kernel<<< grid, block >>>(m,                        //this leads to exactly 64 entries for every thread  
-			      n,
-			      k,
-			      A,
-			      B,
-			      C2);
+    if (i == 2) tic = chrono::steady_clock::now();
+    kernel<<< grid, block >>>(m,
+            n,
+            k,
+            A,
+            B,
+            C2);
     cudaDeviceSynchronize();
   }
   toc = chrono::steady_clock::now();
   double tcutlass = chrono::duration<double>(toc - tic).count() / Nt;
   double cutlass_flops = double(num_flops) / tcutlass / 1.0e9;
   printf("CUBLAS: %.2f Gflops, CUTLASS: %.2f Gflops\n", cublas_flops, cutlass_flops);
+  
   double err = 0;
   for (int i=0; i<n; i++) {
     for (int j=0; j<m; j++) {
-      err += fabs(C[m*i+j] - C2[m*i+j]);               //calculate error
+      err += fabs(C[m*i+j] - C2[m*i+j]);
     }
   }
   printf("error: %lf\n", err/n/m);
+  
   cudaFree(A);
   cudaFree(B);
   cudaFree(C);
