@@ -5,22 +5,13 @@
 #include <cublas_v2.h>
 #include <mma.h>
 #include <chrono>
-#include <cuda_fp16.h>
-
 using namespace std;
 using namespace nvcuda;
 
-__device__ __forceinline__ void cp_async_16B(void* smem_ptr, const void* global_ptr) {
-    uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-    asm volatile(
-        "cp.async.cg.shared.global [%0], [%1], 16;\n"
-        :: "r"(smem_addr), "l"(global_ptr)
-    );
-}
-
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
-                       half *d_a, half *d_b, float *d_c) {
+           float *d_a, float *d_b, float *d_c) {
 
+  // Grid Swizzling: Umverteilung der Blöcke in 8er-Panels
   const int panel_width = 8;
   int bid = blockIdx.y * gridDim.x + blockIdx.x; 
   
@@ -37,30 +28,43 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int warp_id = threadIdx.x / 32;
 
   __shared__ half __align__(16) block_a[2][16][136]; 
-  __shared__ half __align__(16) block_b[2][64][24]; 
+  __shared__ half __align__(16) block_b[2][16][72];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   for (int r = 0; r < 2; r++)
     for (int c = 0; c < 4; c++)
       wmma::fill_fragment(acc[r][c], 0.0f);
 
+  for (int step = 0; step < 4; ++step) {
+    int logical_id = step * 128 + threadIdx.x;
+    int r = logical_id / 32;
+    int c = (logical_id % 32) * 4;
+    float4 vec_a = reinterpret_cast<float4*>(&d_a[r * dim_m + offset_a_m + c])[0];
+    
+    // OPTIMIERUNG: 64-Bit Store für Matrix A
+    half2 h01 = __floats2half2_rn(vec_a.x, vec_a.y);
+    half2 h23 = __floats2half2_rn(vec_a.z, vec_a.w);
+    uint2 pack_a;
+    pack_a.x = reinterpret_cast<unsigned int&>(h01);
+    pack_a.y = reinterpret_cast<unsigned int&>(h23);
+    reinterpret_cast<uint2*>(&block_a[0][r][c])[0] = pack_a;
+  }
   for (int step = 0; step < 2; ++step) {
     int logical_id = step * 128 + threadIdx.x;
-    int k_idx = logical_id / 16;
-    int m_idx = (logical_id % 16) * 8;
-    cp_async_16B(&block_a[0][k_idx][m_idx], &d_a[k_idx * dim_m + offset_a_m + m_idx]);
+    int n_idx = logical_id / 4;
+    int k_idx = (logical_id % 4) * 4;
+    float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k_idx])[0];
+    
+    // Matrix B behält einzelne Zuweisungen wegen Transponierung (Stride)
+    block_b[0][k_idx + 0][n_idx] = __float2half(vec_b.x);
+    block_b[0][k_idx + 1][n_idx] = __float2half(vec_b.y);
+    block_b[0][k_idx + 2][n_idx] = __float2half(vec_b.z);
+    block_b[0][k_idx + 3][n_idx] = __float2half(vec_b.w);
   }
-  
-  int n_idx = threadIdx.x / 2;
-  int k_idx = (threadIdx.x % 2) * 8;
-  cp_async_16B(&block_b[0][n_idx][k_idx], &d_b[(offset_b_n + n_idx) * dim_k + k_idx]);
-
-  asm volatile("cp.async.commit_group;\n" ::);
-  asm volatile("cp.async.wait_group 0;\n" ::);
   __syncthreads();
 
   wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
-  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag[4];
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag[4];
 
   int write_idx = 0;
   
@@ -68,31 +72,43 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     write_idx = 1 - write_idx;
     int read_idx = 1 - write_idx;
 
+    for (int step = 0; step < 4; ++step) {
+      int logical_id = step * 128 + threadIdx.x;
+      int r = logical_id / 32;
+      int c = (logical_id % 32) * 4;
+      float4 vec_a = reinterpret_cast<float4*>(&d_a[(k + r) * dim_m + offset_a_m + c])[0];
+      
+      // OPTIMIERUNG: 64-Bit Store für Matrix A
+      half2 h01 = __floats2half2_rn(vec_a.x, vec_a.y);
+      half2 h23 = __floats2half2_rn(vec_a.z, vec_a.w);
+      uint2 pack_a;
+      pack_a.x = reinterpret_cast<unsigned int&>(h01);
+      pack_a.y = reinterpret_cast<unsigned int&>(h23);
+      reinterpret_cast<uint2*>(&block_a[write_idx][r][c])[0] = pack_a;
+    }
     for (int step = 0; step < 2; ++step) {
       int logical_id = step * 128 + threadIdx.x;
-      int k_id = logical_id / 16;
-      int m_id = (logical_id % 16) * 8;
-      cp_async_16B(&block_a[write_idx][k_id][m_id], &d_a[(k + k_id) * dim_m + offset_a_m + m_id]);
+      int n_idx = logical_id / 4;
+      int k_idx = (logical_id % 4) * 4;
+      float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k + k_idx])[0];
+      block_b[write_idx][k_idx + 0][n_idx] = __float2half(vec_b.x);
+      block_b[write_idx][k_idx + 1][n_idx] = __float2half(vec_b.y);
+      block_b[write_idx][k_idx + 2][n_idx] = __float2half(vec_b.z);
+      block_b[write_idx][k_idx + 3][n_idx] = __float2half(vec_b.w);
     }
-    
-    cp_async_16B(&block_b[write_idx][n_idx][k_idx], &d_b[(offset_b_n + n_idx) * dim_k + k + k_idx]);
-
-    asm volatile("cp.async.commit_group;\n" ::);
 
     for (int r = 0; r < 2; r++) {
       int row_tile = warp_id * 2 + r;
       wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
     }
     for (int c = 0; c < 4; c++) {
-      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][c * 16][0], 24);
+      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
     }
     for (int r = 0; r < 2; r++) {
       for (int c = 0; c < 4; c++) {
         wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
       }
     }
-    
-    asm volatile("cp.async.wait_group 0;\n" ::);
     __syncthreads();
   }
 
@@ -102,7 +118,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
   }
   for (int c = 0; c < 4; c++) {
-    wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][c * 16][0], 24);
+    wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
   }
   for (int r = 0; r < 2; r++) {
     for (int c = 0; c < 4; c++) {
