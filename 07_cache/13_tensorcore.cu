@@ -8,6 +8,9 @@
 using namespace std;
 using namespace nvcuda;
 
+//track of improvements: 
+//
+
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
            float *d_a, float *d_b, float *d_c) {
   int offset_a_m = 128 * blockIdx.x;
@@ -198,3 +201,41 @@ int main(int argc, const char **argv) {
   cudaFree(C2);
   cublasDestroy(cublas_handle);
 }
+
+/*
+ * Performance Optimization History:
+ * Testing Environment: gpu_h
+ * Baseline Performance: ~9,517 GFLOPS
+ *
+ * 1. 08_block_8x8.cu: 
+ * Implemented an 8x8 block_c.
+ * Performance: Minimal improvement over baseline.
+ *
+ * 2. 09_reg_load.cu: 
+ * Used vec_t (vectorized register loads).
+ * Performance: ~22,000 GFLOPS.
+ *
+ * 3. 10_align.cu: 
+ * Added __align__ to shared memory.
+ * Performance: No significant improvement.
+ *
+ * 4. Bank Conflict Resolution: 
+ * Added +8 padding to shared memory.
+ * Performance: ~44,030 GFLOPS (almost 100% improvement from step 2).
+ *
+ * 5. Thread Scaling (128 Threads): 
+ * Increased block size to 128 threads (4 warps), Tile 128x64.
+ * Performance: ~66,123 GFLOPS.
+ *
+ * 6. Thread Scaling (256 Threads): 
+ * Increased to 256 threads (8 warps), Tile 128x128.
+ * Performance: Dropped to ~52,030 GFLOPS due to register spilling.
+ *
+ * 7. Rollback: 
+ * Reverted to 128 threads / 128x64 Tile for optimal SM occupancy.
+ * Performance: Restored ~66,123 GFLOPS.
+ *
+ * 8. Double Buffering: 
+ * Implemented ping-pong buffers to hide global memory latency.
+ * Performance: ~67,551 GFLOPS.
+ */
