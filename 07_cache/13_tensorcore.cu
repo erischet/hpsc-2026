@@ -26,13 +26,25 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   for (int k = 0; k < dim_k; k += 16) {
     __syncthreads();                                          //calculations form before are finished
-    for (int j = 0; j < 16; ++j) {
-      block_a[j][i] = __float2half(d_a[(k + j) * dim_m + offset_a_m + i]); //i is threadindex
-      block_b[j][i] = __float2half(d_b[(offset_b_n + i) * dim_k + k + j]); //
+
+    // Improvement 09
+    for (int step = 0; step < 16; step += 4) {
+        int r = step + (i / 16);     // Zeilen-Zuordnung (0 bis 15)
+        int c = (i % 16) * 4;        // Spalten-Zuordnung in 4er-Blöcken
+
+        // Ein einzelner 128-Bit Ladebefehl aus dem globalen Speicher
+        float4 vec_a = reinterpret_cast<float4*>(&d_a[(k + r) * dim_m + offset_a_m + c])[0];
+
+        // Konvertierung zu FP16 und Speicherung im schnellen Shared Memory
+        block_a[r][c + 0] = __float2half(vec_a.x);
+        block_a[r][c + 1] = __float2half(vec_a.y);
+        block_a[r][c + 2] = __float2half(vec_a.z);
+        block_a[r][c + 3] = __float2half(vec_a.w);
+        //end improvement 09
     }
     __syncthreads();                                          //loading the data is finished
 
-    //Improvements for 08
+    //Improvements for 08 - not sure if really of advantage, performance almost doesn't get better
     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag[4];
 
@@ -51,7 +63,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       }
     }
   }
-  //end improvement 08S
+  //end improvement 08
 
   for (int r = 0; r < 2; r++) {
     for (int c = 0; c < 4; c++) {
