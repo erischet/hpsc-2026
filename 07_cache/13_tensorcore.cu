@@ -17,8 +17,9 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int offset_b_n = 64 * blockIdx.y;
   int warp_id = threadIdx.x / 32;
 
-  __shared__ half __align__(16) block_a[2][16][136]; 
-  __shared__ half __align__(16) block_b[2][16][72];
+  // NEU: K-Dimension auf 32 erweitert
+  __shared__ half __align__(16) block_a[2][32][136]; 
+  __shared__ half __align__(16) block_b[2][32][72];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   for (int r = 0; r < 2; r++)
@@ -26,7 +27,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       wmma::fill_fragment(acc[r][c], 0.0f);
 
   // Prolog: Erste Kachel (k=0) in Puffer 0 laden
-  for (int step = 0; step < 4; ++step) {
+  // NEU: 8 Schritte für A
+  for (int step = 0; step < 8; ++step) {
     int logical_id = step * 128 + threadIdx.x;
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
@@ -36,10 +38,11 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     block_a[0][r][c + 2] = __float2half(vec_a.z);
     block_a[0][r][c + 3] = __float2half(vec_a.w);
   }
-  for (int step = 0; step < 2; ++step) {
+  // NEU: 4 Schritte für B, Modulo-Rechnung auf 8 angepasst
+  for (int step = 0; step < 4; ++step) {
     int logical_id = step * 128 + threadIdx.x;
-    int n_idx = logical_id / 4;
-    int k_idx = (logical_id % 4) * 4;
+    int n_idx = logical_id / 8;
+    int k_idx = (logical_id % 8) * 4;
     float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k_idx])[0];
     block_b[0][k_idx + 0][n_idx] = __float2half(vec_b.x);
     block_b[0][k_idx + 1][n_idx] = __float2half(vec_b.y);
@@ -53,13 +56,13 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   int write_idx = 0;
   
-  // Hauptschleife: Laden für nächsten Schritt und Rechnen mit aktuellem Schritt überlappen
-  for (int k = 16; k < dim_k; k += 16) {
+  // Hauptschleife: k-Schritt ist nun 32
+  for (int k = 32; k < dim_k; k += 32) {
     write_idx = 1 - write_idx;
     int read_idx = 1 - write_idx;
 
     // 1. Puffer für nächsten Durchlauf laden (k)
-    for (int step = 0; step < 4; ++step) {
+    for (int step = 0; step < 8; ++step) {
       int logical_id = step * 128 + threadIdx.x;
       int r = logical_id / 32;
       int c = (logical_id % 32) * 4;
@@ -69,10 +72,10 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       block_a[write_idx][r][c + 2] = __float2half(vec_a.z);
       block_a[write_idx][r][c + 3] = __float2half(vec_a.w);
     }
-    for (int step = 0; step < 2; ++step) {
+    for (int step = 0; step < 4; ++step) {
       int logical_id = step * 128 + threadIdx.x;
-      int n_idx = logical_id / 4;
-      int k_idx = (logical_id % 4) * 4;
+      int n_idx = logical_id / 8;
+      int k_idx = (logical_id % 8) * 4;
       float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + k + k_idx])[0];
       block_b[write_idx][k_idx + 0][n_idx] = __float2half(vec_b.x);
       block_b[write_idx][k_idx + 1][n_idx] = __float2half(vec_b.y);
@@ -80,21 +83,53 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       block_b[write_idx][k_idx + 3][n_idx] = __float2half(vec_b.w);
     }
 
-    // 2. Mit Daten aus vorherigem Durchlauf rechnen (k-16)
+    // 2. Mit Daten aus vorherigem Durchlauf rechnen (k-32)
+    // NEU: Innere Schleife für die zwei K-Segmente (0 und 1)
+    for (int k_step = 0; k_step < 2; ++k_step) {
+      for (int r = 0; r < 2; r++) {
+        int row_tile = warp_id * 2 + r;
+        wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][k_step * 16][row_tile * 16], 136);
+      }
+      for (int c = 0; c < 4; c++) {
+        wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][k_step * 16][c * 16], 72);
+      }
+      for (int r = 0; r < 2; r++) {
+        for (int c = 0; c < 4; c++) {
+          wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  // Epilog: Letzte geladene Kachel berechnen
+  int read_idx = write_idx;
+  // NEU: Ebenfalls innere Schleife für den Epilog
+  for (int k_step = 0; k_step < 2; ++k_step) {
     for (int r = 0; r < 2; r++) {
       int row_tile = warp_id * 2 + r;
-      wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][0][row_tile * 16], 136);
+      wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][k_step * 16][row_tile * 16], 136);
     }
     for (int c = 0; c < 4; c++) {
-      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][c * 16], 72);
+      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][k_step * 16][c * 16], 72);
     }
     for (int r = 0; r < 2; r++) {
       for (int c = 0; c < 4; c++) {
         wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
       }
     }
-    __syncthreads();
   }
+
+  // Zurückschreiben in C
+  for (int r = 0; r < 2; r++) {
+    for (int c = 0; c < 4; c++) {
+      int c_m = offset_a_m + (warp_id * 2 + r) * 16;
+      int c_n = offset_b_n + c * 16;
+      if (c_n < dim_n && c_m < dim_m)
+        wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m], acc[r][c], dim_m, wmma::mem_col_major);
+    }
+  }
+}
 
   // Epilog: Letzte geladene Kachel berechnen
   int read_idx = write_idx;
@@ -238,4 +273,12 @@ int main(int argc, const char **argv) {
  * 8. Double Buffering: 
  * Implemented ping-pong buffers to hide global memory latency.
  * Performance: ~67,551 GFLOPS.
+ */
+
+ /*
+ * 9. K-Dimension Scaling (K=32): 
+ * Increased K-Tile size from 16 to 32.
+ * Doubled arithmetic intensity by feeding 32 elements to Tensor Cores per loop.
+ * Retained 128 threads and optimal register count.
+ * Performance: [Bitte aktuelle GFLOPS eintragen]
  */
