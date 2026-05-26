@@ -7,7 +7,6 @@
 #include <chrono>
 using namespace std;
 using namespace nvcuda;
-
 __global__ void kernel(int dim_m, int dim_n, int dim_k, float *d_a, float *d_b, float *d_c) {
   int offset_a_m = 128 * blockIdx.x;
   int offset_b_n = 128 * blockIdx.y;
@@ -137,7 +136,7 @@ int main(int argc, const char **argv) {
   int tile_m = 128;
   int tile_n = 128;                
   //dim3 helps with threadIdx.x and y (optional z) later          
-  dim3 block = dim3(128);                                                //comment might be outdated: amount of threads started in GPU = 64; do not use all to: don't overfloat L1 cache, apparently some kind of sweet spot
+  dim3 block = dim3(256);                                                
   dim3 grid = dim3((m + tile_m - 1) / tile_m, (n + tile_n - 1) / tile_n);   //amount of blocks started in GPU, dim 0 and 1 get multiplied
   for (int i = 0; i < Nt+2; i++) {
     if (i == 2) tic = chrono::steady_clock::now();      //warmup again
