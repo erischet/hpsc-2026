@@ -25,4 +25,7 @@
 12_vector_4x2: 12_vector_4x2.cu
 	nvcc Geminis_prp.cu -O3 -arch=sm_90 -Xcompiler -lcublas
 13_tensorcore: 13_tensorcore.cu
-	nvcc 13_tensorcore.cu -O3 -arch=sm_90 -Xcompiler -lcublas
+	nvcc 13_tensorcore.cu -O3 -arch=sm_90 -o 13_tensorcore -lcublas
+13_tensorcore_info: 13_tensorcore.cu    
+	nvcc 13_tensorcore.cu -O3 -arch=sm_90 -Xptxas -v -o 13_tensorcore_info -lcublas
+	
