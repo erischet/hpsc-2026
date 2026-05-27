@@ -174,14 +174,35 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   }
 
   // Epilogue
+  __syncthreads();
+  float *smem_c = reinterpret_cast<float*>(smem);
+
+  // 1. Store fragments into shared memory
   #pragma unroll
   for (int r = 0; r < 2; r++) {
     #pragma unroll
     for (int c = 0; c < 4; c++) {
-      int c_m = offset_a_m + (warp_row * 2 + r) * 16;
-      int c_n = offset_b_n + (warp_col * 4 + c) * 16;
-      if (c_n < dim_n && c_m < dim_m)
-        wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m], acc[r][c], dim_m, wmma::mem_col_major);
+      int smem_m = (warp_row * 2 + r) * 16;
+      int smem_n = (warp_col * 4 + c) * 16;
+      wmma::store_matrix_sync(&smem_c[smem_n * 128 + smem_m], acc[r][c], 128, wmma::mem_col_major);
+    }
+  }
+
+  __syncthreads();
+
+  // 2. Coalesced float4 writes to global memory
+  #pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    int logical_id = i * 256 + threadIdx.x;
+    int n_idx = logical_id / 32;
+    int m_idx_vec = logical_id % 32;
+    
+    int g_m = offset_a_m + (m_idx_vec * 4);
+    int g_n = offset_b_n + n_idx;
+
+    if (g_n < dim_n && g_m < dim_m) {
+      float4 out_vec = reinterpret_cast<float4*>(&smem_c[n_idx * 128 + m_idx_vec * 4])[0];
+      reinterpret_cast<float4*>(&d_c[g_n * dim_m + g_m])[0] = out_vec;
     }
   }
 }
@@ -236,7 +257,9 @@ int main(int argc, const char **argv) {
   dim3 block = dim3(256);
   dim3 grid = dim3((m + tile_m - 1) / tile_m, (n + tile_n - 1) / tile_n);
  
-  int smem_size = (3 * 32 * 136 + 3 * 128 * 40) * sizeof(half);
+  int smem_compute = (3 * 32 * 136 + 3 * 128 * 40) * sizeof(half);
+  int smem_epilogue = 128 * 128 * sizeof(float);
+  int smem_size = (smem_compute > smem_epilogue) ? smem_compute : smem_epilogue;
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
   for (int i = 0; i < Nt+2; i++) {
