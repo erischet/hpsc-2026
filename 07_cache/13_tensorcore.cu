@@ -5,6 +5,8 @@
 #include <cublas_v2.h>
 #include <mma.h>
 #include <chrono>
+#include <cuda_fp16.h> // WICHTIG: Fehlt vorher, wird für half2 benötigt
+
 using namespace std;
 using namespace nvcuda;
 
@@ -30,7 +32,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   extern __shared__ half smem[];
   half (*block_a)[16][136] = reinterpret_cast<half (*)[16][136]>(smem);
-  half (*block_b)[16][136] = reinterpret_cast<half (*)[16][136]>(smem + (3 * 16 * 136));
+  half (*block_b)[128][24] = reinterpret_cast<half (*)[128][24]>(smem + (3 * 16 * 136));
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   #pragma unroll
@@ -51,16 +53,16 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     block_a[0][r][c + 2] = __float2half(vec_a.z);
     block_a[0][r][c + 3] = __float2half(vec_a.w);
   }
+  
+  // Vektorisiertes Laden für B (Stage 0)
   #pragma unroll
   for (int step = 0; step < 2; ++step) {
     int logical_id = step * 256 + threadIdx.x;
     int n_idx = logical_id / 4;
     int k_idx = (logical_id % 4) * 4;
     float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 0 + k_idx])[0];
-    block_b[0][k_idx + 0][n_idx] = __float2half(vec_b.x);
-    block_b[0][k_idx + 1][n_idx] = __float2half(vec_b.y);
-    block_b[0][k_idx + 2][n_idx] = __float2half(vec_b.z);
-    block_b[0][k_idx + 3][n_idx] = __float2half(vec_b.w);
+    reinterpret_cast<half2*>(&block_b[0][n_idx][k_idx])[0] = __floats2half2_rn(vec_b.x, vec_b.y);
+    reinterpret_cast<half2*>(&block_b[0][n_idx][k_idx])[1] = __floats2half2_rn(vec_b.z, vec_b.w);
   }
 
   // Prologue: Load Stage 1 (k = 16)
@@ -76,22 +78,24 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       block_a[1][r][c + 2] = __float2half(vec_a.z);
       block_a[1][r][c + 3] = __float2half(vec_a.w);
     }
+    
+    // Vektorisiertes Laden für B (Stage 1)
     #pragma unroll
     for (int step = 0; step < 2; ++step) {
       int logical_id = step * 256 + threadIdx.x;
       int n_idx = logical_id / 4;
       int k_idx = (logical_id % 4) * 4;
       float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 16 + k_idx])[0];
-      block_b[1][k_idx + 0][n_idx] = __float2half(vec_b.x);
-      block_b[1][k_idx + 1][n_idx] = __float2half(vec_b.y);
-      block_b[1][k_idx + 2][n_idx] = __float2half(vec_b.z);
-      block_b[1][k_idx + 3][n_idx] = __float2half(vec_b.w);
+      reinterpret_cast<half2*>(&block_b[1][n_idx][k_idx])[0] = __floats2half2_rn(vec_b.x, vec_b.y);
+      reinterpret_cast<half2*>(&block_b[1][n_idx][k_idx])[1] = __floats2half2_rn(vec_b.z, vec_b.w);
     }
   }
   __syncthreads();
 
   wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
-  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag[4];
+  
+  // Matrix B Fragment ist jetzt col_major!
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag[4];
 
   // Main Loop
   for (int k = 0; k < dim_k; k += 16) {
@@ -111,16 +115,16 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
         block_a[write_idx][r][c + 2] = __float2half(vec_a.z);
         block_a[write_idx][r][c + 3] = __float2half(vec_a.w);
       }
+      
+      // Vektorisiertes Laden für B (Main Loop)
       #pragma unroll
       for (int step = 0; step < 2; ++step) {
         int logical_id = step * 256 + threadIdx.x;
         int n_idx = logical_id / 4;
         int k_idx = (logical_id % 4) * 4;
         float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + next_k + k_idx])[0];
-        block_b[write_idx][k_idx + 0][n_idx] = __float2half(vec_b.x);
-        block_b[write_idx][k_idx + 1][n_idx] = __float2half(vec_b.y);
-        block_b[write_idx][k_idx + 2][n_idx] = __float2half(vec_b.z);
-        block_b[write_idx][k_idx + 3][n_idx] = __float2half(vec_b.w);
+        reinterpret_cast<half2*>(&block_b[write_idx][n_idx][k_idx])[0] = __floats2half2_rn(vec_b.x, vec_b.y);
+        reinterpret_cast<half2*>(&block_b[write_idx][n_idx][k_idx])[1] = __floats2half2_rn(vec_b.z, vec_b.w);
       }
     }
 
@@ -132,7 +136,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     #pragma unroll
     for (int c = 0; c < 4; c++) {
       int col_tile = warp_col * 4 + c;
-      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][0][col_tile * 16], 136);
+      // Angepasster Load-Befehl für das [128][24] Layout mit Stride 24
+      wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][col_tile * 16][0], 24);
     }
     #pragma unroll
     for (int r = 0; r < 2; r++) {
@@ -209,19 +214,19 @@ int main(int argc, const char **argv) {
   dim3 block = dim3(256);
   dim3 grid = dim3((m + tile_m - 1) / tile_m, (n + tile_n - 1) / tile_n);
  
-  // Dynamische Shared-Memory-Größe berechnen und Attribut setzen
-  int smem_size = (3 * 16 * 136 + 3 * 16 * 136) * sizeof(half);
+  // ANGEPASST: Speichergröße berechnen für [16][136] und das neue [128][24] Layout!
+  int smem_size = (3 * 16 * 136 + 3 * 128 * 24) * sizeof(half);
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
   for (int i = 0; i < Nt+2; i++) {
     if (i == 2) tic = chrono::steady_clock::now();
     // smem_size im Kernel-Aufruf übergeben
     kernel<<< grid, block, smem_size >>>(m,
-            n,
-            k,
-            A,
-            B,
-            C2);
+             n,
+             k,
+             A,
+             B,
+             C2);
     cudaDeviceSynchronize();
   }
   toc = chrono::steady_clock::now();
@@ -305,5 +310,11 @@ int main(int argc, const char **argv) {
  /*
  * 14. 3-Stage Software Pipeline Analysis:
  * Implemented 3-stage buffering to further hide global memory latency.
- * Result: Performance remained stagnant, with a slight decrease compared to the previous double-buffering baseline. 
-*/
+ * Result: Performance remained stagnant, with a slight decrease compared to the previous double-buffering baseline. Maybe go back later to 2-stage.
+ /*
+ * 15. Shared Memory Transposition & Vectorization (Matrix B):
+ * Transposed Matrix B in shared memory to [128][24] (N=128, K=16 + 8 padding).
+ * Replaced individual 16-bit __float2half stores with 32-bit __floats2half2_rn.
+ * Changed Matrix B wmma fragment to col_major.
+ * Result: Halved memory store instructions, resolving the instruction pipeline bottleneck.
+ */
