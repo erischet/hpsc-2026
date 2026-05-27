@@ -15,13 +15,14 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   const int panel_width = 8;
   int bid = blockIdx.y * gridDim.x + blockIdx.x;
-  
-  int panel_id = bid / (gridDim.y * panel_width);
-  int bid_within_panel = bid % (gridDim.y * panel_width);
-  
-  int new_blockIdx_x = panel_id * panel_width + (bid_within_panel % panel_width);
-  int new_blockIdx_y = bid_within_panel / panel_width;
-  
+
+  int panel_id = bid / (gridDim.x * panel_width);
+  int bid_within_panel = bid % (gridDim.x * panel_width);
+
+  // Sweep X entirely while restricting Y to the panel width
+  int new_blockIdx_x = bid_within_panel % gridDim.x;
+  int new_blockIdx_y = panel_id * panel_width + (bid_within_panel / gridDim.x);
+
   if (new_blockIdx_x >= gridDim.x || new_blockIdx_y >= gridDim.y) return;
 
   int offset_a_m = 128 * new_blockIdx_x;
@@ -376,5 +377,5 @@ int main(int argc, const char **argv) {
  /*
  * 16. Register Double-Buffering & Epilogue Coalescing:
  * - Implemented register double-buffering for global loads to resolve RAW stalls and overlap memory fetches with Tensor Core computation.
- * - Added shared memory staging in the epilogue for coalesced float4 writes to global memory.
+ * - Added shared memory staging in the epilogue for coalesced float4 writes to global memory. --> 87430.32 Gflops
  */
