@@ -15,13 +15,13 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   const int panel_width = 8;
   int bid = blockIdx.y * gridDim.x + blockIdx.x;
- 
+  
   int panel_id = bid / (gridDim.y * panel_width);
   int bid_within_panel = bid % (gridDim.y * panel_width);
- 
+  
   int new_blockIdx_x = panel_id * panel_width + (bid_within_panel % panel_width);
   int new_blockIdx_y = bid_within_panel / panel_width;
- 
+  
   if (new_blockIdx_x >= gridDim.x || new_blockIdx_y >= gridDim.y) return;
 
   int offset_a_m = 128 * new_blockIdx_x;
@@ -41,17 +41,16 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     for (int c = 0; c < 4; c++)
       wmma::fill_fragment(acc[r][c], 0.0f);
 
+  float4 vec_a_reg[4];
+  float4 vec_b_reg[4];
+
   // Prologue: Load Stage 0 (k = 0)
   #pragma unroll
   for (int step = 0; step < 4; ++step) {
     int logical_id = step * 256 + threadIdx.x;
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
-    float4 vec_a = reinterpret_cast<float4*>(&d_a[(0 + r) * dim_m + offset_a_m + c])[0];
-    block_a[0][r][c + 0] = __float2half(vec_a.x);
-    block_a[0][r][c + 1] = __float2half(vec_a.y);
-    block_a[0][r][c + 2] = __float2half(vec_a.z);
-    block_a[0][r][c + 3] = __float2half(vec_a.w);
+    vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(0 + r) * dim_m + offset_a_m + c])[0];
   }
   
   #pragma unroll
@@ -59,9 +58,21 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     int logical_id = step * 256 + threadIdx.x;
     int n_idx = logical_id / 8;
     int k_idx = (logical_id % 8) * 4;
-    float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 0 + k_idx])[0];
-    reinterpret_cast<half2*>(&block_b[0][n_idx][k_idx])[0] = __floats2half2_rn(vec_b.x, vec_b.y);
-    reinterpret_cast<half2*>(&block_b[0][n_idx][k_idx])[1] = __floats2half2_rn(vec_b.z, vec_b.w);
+    vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 0 + k_idx])[0];
+  }
+
+  #pragma unroll
+  for (int step = 0; step < 4; ++step) {
+    int logical_id = step * 256 + threadIdx.x;
+    int r = logical_id / 32;
+    int c = (logical_id % 32) * 4;
+    reinterpret_cast<half2*>(&block_a[0][r][c])[0] = __floats2half2_rn(vec_a_reg[step].x, vec_a_reg[step].y);
+    reinterpret_cast<half2*>(&block_a[0][r][c])[1] = __floats2half2_rn(vec_a_reg[step].z, vec_a_reg[step].w);
+    
+    int n_idx = logical_id / 8;
+    int k_idx = (logical_id % 8) * 4;
+    reinterpret_cast<half2*>(&block_b[0][n_idx][k_idx])[0] = __floats2half2_rn(vec_b_reg[step].x, vec_b_reg[step].y);
+    reinterpret_cast<half2*>(&block_b[0][n_idx][k_idx])[1] = __floats2half2_rn(vec_b_reg[step].z, vec_b_reg[step].w);
   }
 
   // Prologue: Load Stage 1 (k = 32)
@@ -71,11 +82,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       int logical_id = step * 256 + threadIdx.x;
       int r = logical_id / 32;
       int c = (logical_id % 32) * 4;
-      float4 vec_a = reinterpret_cast<float4*>(&d_a[(32 + r) * dim_m + offset_a_m + c])[0];
-      block_a[1][r][c + 0] = __float2half(vec_a.x);
-      block_a[1][r][c + 1] = __float2half(vec_a.y);
-      block_a[1][r][c + 2] = __float2half(vec_a.z);
-      block_a[1][r][c + 3] = __float2half(vec_a.w);
+      vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(32 + r) * dim_m + offset_a_m + c])[0];
     }
     
     #pragma unroll
@@ -83,9 +90,21 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       int logical_id = step * 256 + threadIdx.x;
       int n_idx = logical_id / 8;
       int k_idx = (logical_id % 8) * 4;
-      float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 32 + k_idx])[0];
-      reinterpret_cast<half2*>(&block_b[1][n_idx][k_idx])[0] = __floats2half2_rn(vec_b.x, vec_b.y);
-      reinterpret_cast<half2*>(&block_b[1][n_idx][k_idx])[1] = __floats2half2_rn(vec_b.z, vec_b.w);
+      vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 32 + k_idx])[0];
+    }
+
+    #pragma unroll
+    for (int step = 0; step < 4; ++step) {
+      int logical_id = step * 256 + threadIdx.x;
+      int r = logical_id / 32;
+      int c = (logical_id % 32) * 4;
+      reinterpret_cast<half2*>(&block_a[1][r][c])[0] = __floats2half2_rn(vec_a_reg[step].x, vec_a_reg[step].y);
+      reinterpret_cast<half2*>(&block_a[1][r][c])[1] = __floats2half2_rn(vec_a_reg[step].z, vec_a_reg[step].w);
+      
+      int n_idx = logical_id / 8;
+      int k_idx = (logical_id % 8) * 4;
+      reinterpret_cast<half2*>(&block_b[1][n_idx][k_idx])[0] = __floats2half2_rn(vec_b_reg[step].x, vec_b_reg[step].y);
+      reinterpret_cast<half2*>(&block_b[1][n_idx][k_idx])[1] = __floats2half2_rn(vec_b_reg[step].z, vec_b_reg[step].w);
     }
   }
   __syncthreads();
@@ -105,11 +124,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
         int logical_id = step * 256 + threadIdx.x;
         int r = logical_id / 32;
         int c = (logical_id % 32) * 4;
-        float4 vec_a = reinterpret_cast<float4*>(&d_a[(next_k + r) * dim_m + offset_a_m + c])[0];
-        block_a[write_idx][r][c + 0] = __float2half(vec_a.x);
-        block_a[write_idx][r][c + 1] = __float2half(vec_a.y);
-        block_a[write_idx][r][c + 2] = __float2half(vec_a.z);
-        block_a[write_idx][r][c + 3] = __float2half(vec_a.w);
+        vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(next_k + r) * dim_m + offset_a_m + c])[0];
       }
       
       #pragma unroll
@@ -117,9 +132,21 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
         int logical_id = step * 256 + threadIdx.x;
         int n_idx = logical_id / 8;
         int k_idx = (logical_id % 8) * 4;
-        float4 vec_b = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + next_k + k_idx])[0];
-        reinterpret_cast<half2*>(&block_b[write_idx][n_idx][k_idx])[0] = __floats2half2_rn(vec_b.x, vec_b.y);
-        reinterpret_cast<half2*>(&block_b[write_idx][n_idx][k_idx])[1] = __floats2half2_rn(vec_b.z, vec_b.w);
+        vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + next_k + k_idx])[0];
+      }
+
+      #pragma unroll
+      for (int step = 0; step < 4; ++step) {
+        int logical_id = step * 256 + threadIdx.x;
+        int r = logical_id / 32;
+        int c = (logical_id % 32) * 4;
+        reinterpret_cast<half2*>(&block_a[write_idx][r][c])[0] = __floats2half2_rn(vec_a_reg[step].x, vec_a_reg[step].y);
+        reinterpret_cast<half2*>(&block_a[write_idx][r][c])[1] = __floats2half2_rn(vec_a_reg[step].z, vec_a_reg[step].w);
+        
+        int n_idx = logical_id / 8;
+        int k_idx = (logical_id % 8) * 4;
+        reinterpret_cast<half2*>(&block_b[write_idx][n_idx][k_idx])[0] = __floats2half2_rn(vec_b_reg[step].x, vec_b_reg[step].y);
+        reinterpret_cast<half2*>(&block_b[write_idx][n_idx][k_idx])[1] = __floats2half2_rn(vec_b_reg[step].z, vec_b_reg[step].w);
       }
     }
 
@@ -301,5 +328,7 @@ int main(int argc, const char **argv) {
  * Transposed Matrix B in shared memory to [128][24] (N=128, K=16 + 8 padding).
  * Replaced individual 16-bit __float2half stores with 32-bit __floats2half2_rn.
  * Changed Matrix B wmma fragment to col_major. 
- * Updated to 32 --> better than 64 (performance decrease) --> 80.000 Gflops
+ * Updated to 32 --> better than 64 (performance decrease) --> 80782.16 Gflops
+ * Tried 2 stage buffering: 79901.31 Gflops
+ * Tried 4 stage buffering: 80056.43 Gflops
  */
