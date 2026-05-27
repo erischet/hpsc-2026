@@ -27,7 +27,7 @@
 13_tensorcore: 13_tensorcore.cu
 	nvcc 13_tensorcore.cu -O3 -arch=sm_90 -lcublas
 13_tensorcore_best2705: 13_tensorcore_best2705.cu
-	nvcc 13_tensorcore.cu -O3 -arch=sm_90 -lcublas
+	nvcc 13_tensorcore_best2705.cu -O3 -arch=sm_90 -lcublas
 13_tensorcore_info: 13_tensorcore.cu    
 	nvcc 13_tensorcore.cu -O3 -arch=sm_90 -Xptxas -v -o 13_tensorcore_info -lcublas
 	
