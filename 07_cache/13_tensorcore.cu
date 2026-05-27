@@ -35,9 +35,9 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   half (*block_b)[128][40] = reinterpret_cast<half (*)[128][40]>(smem + (2 * 32 * 136));
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
-  #pragma unroll
+
   for (int r = 0; r < 2; r++)
-    #pragma unroll
+ 
     for (int c = 0; c < 4; c++)
       wmma::fill_fragment(acc[r][c], 0.0f);
 
@@ -45,21 +45,21 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   float4 vec_b_reg[4];
 
   // Prologue: Load Stage 0 (k = 0)
-  #pragma unroll
+
   for (int step = 0; step < 4; ++step) {
     int logical_id = step * 256 + threadIdx.x;
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
     vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(0 + r) * dim_m + offset_a_m + c])[0];
   }
-  #pragma unroll
+
   for (int step = 0; step < 4; ++step) {
     int logical_id = step * 256 + threadIdx.x;
     int n_idx = logical_id / 8;
     int k_idx = (logical_id % 8) * 4;
     vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 0 + k_idx])[0];
   }
-  #pragma unroll
+
   for (int step = 0; step < 4; ++step) {
     int logical_id = step * 256 + threadIdx.x;
     int r = logical_id / 32;
@@ -75,14 +75,14 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   // Prologue: Pre-Fetch Stage 1 (k = 32) in Register
   if (32 < dim_k) {
-    #pragma unroll
+
     for (int step = 0; step < 4; ++step) {
       int logical_id = step * 256 + threadIdx.x;
       int r = logical_id / 32;
       int c = (logical_id % 32) * 4;
       vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(32 + r) * dim_m + offset_a_m + c])[0];
     }
-    #pragma unroll
+
     for (int step = 0; step < 4; ++step) {
       int logical_id = step * 256 + threadIdx.x;
       int n_idx = logical_id / 8;
@@ -105,7 +105,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
     // 1. Speichern der vorab geladenen Register im Shared Memory
     if (next_k < dim_k) {
-      #pragma unroll
+       
       for (int step = 0; step < 4; ++step) {
         int logical_id = step * 256 + threadIdx.x;
         int r = logical_id / 32;
@@ -122,7 +122,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
     // 2. Initialisierung asynchroner globaler Ladevorgänge
     if (fetch_k < dim_k) {
-      #pragma unroll
+       
       for (int step = 0; step < 4; ++step) {
         int logical_id = step * 256 + threadIdx.x;
         int r = logical_id / 32;
@@ -130,7 +130,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
         vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(fetch_k + r) * dim_m + offset_a_m + c])[0];
       }
       
-      #pragma unroll
+       
       for (int step = 0; step < 4; ++step) {
         int logical_id = step * 256 + threadIdx.x;
         int n_idx = logical_id / 8;
@@ -140,21 +140,21 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     }
 
     // 3. Tensor Core Berechnungsphase
-    #pragma unroll
+     
     for (int k_step = 0; k_step < 32; k_step += 16) {
-      #pragma unroll
+       
       for (int r = 0; r < 2; r++) {
         int row_tile = warp_row * 2 + r;
         wmma::load_matrix_sync(a_frag[r], &block_a[read_idx][k_step][row_tile * 16], 136);
       }
-      #pragma unroll
+       
       for (int c = 0; c < 4; c++) {
         int col_tile = warp_col * 4 + c;
         wmma::load_matrix_sync(b_frag[c], &block_b[read_idx][col_tile * 16][k_step], 40);
       }
-      #pragma unroll
+       
       for (int r = 0; r < 2; r++) {
-        #pragma unroll
+         
         for (int c = 0; c < 4; c++) {
           wmma::mma_sync(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
         }
@@ -167,9 +167,9 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   __syncthreads();
   float *smem_c = reinterpret_cast<float*>(smem);
 
-  #pragma unroll
+   
   for (int r = 0; r < 2; r++) {
-    #pragma unroll
+     
     for (int c = 0; c < 4; c++) {
       int smem_m = (warp_row * 2 + r) * 16;
       int smem_n = (warp_col * 4 + c) * 16;
@@ -179,7 +179,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   __syncthreads();
 
-  #pragma unroll
+   
   for (int i = 0; i < 16; ++i) {
     int logical_id = i * 256 + threadIdx.x;
     int n_idx = logical_id / 32;
