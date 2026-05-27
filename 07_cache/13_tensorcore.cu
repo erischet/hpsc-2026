@@ -32,7 +32,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   extern __shared__ half smem[];
   half (*block_a)[32][136] = reinterpret_cast<half (*)[32][136]>(smem);
-  half (*block_b)[128][40] = reinterpret_cast<half (*)[128][40]>(smem + (3 * 32 * 136));
+  half (*block_b)[128][40] = reinterpret_cast<half (*)[128][40]>(smem + (2 * 32 * 136));
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   #pragma unroll
@@ -73,7 +73,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     reinterpret_cast<half2*>(&block_b[0][n_idx][k_idx])[1] = __floats2half2_rn(vec_b_reg[step].z, vec_b_reg[step].w);
   }
 
-  // Prologue: Load Stage 1 (k = 32)
+  // Prologue: Pre-Fetch Stage 1 (k = 32) in Register
   if (32 < dim_k) {
     #pragma unroll
     for (int step = 0; step < 4; ++step) {
@@ -89,37 +89,6 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       int k_idx = (logical_id % 8) * 4;
       vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 32 + k_idx])[0];
     }
-    #pragma unroll
-    for (int step = 0; step < 4; ++step) {
-      int logical_id = step * 256 + threadIdx.x;
-      int r = logical_id / 32;
-      int c = (logical_id % 32) * 4;
-      reinterpret_cast<half2*>(&block_a[1][r][c])[0] = __floats2half2_rn(vec_a_reg[step].x, vec_a_reg[step].y);
-      reinterpret_cast<half2*>(&block_a[1][r][c])[1] = __floats2half2_rn(vec_a_reg[step].z, vec_a_reg[step].w);
-      
-      int n_idx = logical_id / 8;
-      int k_idx = (logical_id % 8) * 4;
-      reinterpret_cast<half2*>(&block_b[1][n_idx][k_idx])[0] = __floats2half2_rn(vec_b_reg[step].x, vec_b_reg[step].y);
-      reinterpret_cast<half2*>(&block_b[1][n_idx][k_idx])[1] = __floats2half2_rn(vec_b_reg[step].z, vec_b_reg[step].w);
-    }
-  }
-
-  // Prologue: Pre-Fetch Stage 2 (k = 64) in Register
-  if (64 < dim_k) {
-    #pragma unroll
-    for (int step = 0; step < 4; ++step) {
-      int logical_id = step * 256 + threadIdx.x;
-      int r = logical_id / 32;
-      int c = (logical_id % 32) * 4;
-      vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(64 + r) * dim_m + offset_a_m + c])[0];
-    }
-    #pragma unroll
-    for (int step = 0; step < 4; ++step) {
-      int logical_id = step * 256 + threadIdx.x;
-      int n_idx = logical_id / 8;
-      int k_idx = (logical_id % 8) * 4;
-      vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 64 + k_idx])[0];
-    }
   }
   
   __syncthreads();
@@ -129,12 +98,12 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   // Main Loop
   for (int k = 0; k < dim_k; k += 32) {
-    int next_k = k + 64;   // In den Registern bereitstehende Daten
-    int fetch_k = k + 96;  // Als Nächstes abzurufende Daten
-    int write_idx = ((k / 32) + 2) % 3;
-    int read_idx = (k / 32) % 3;
+    int next_k = k + 32;   // In den Registern bereitstehende Daten
+    int fetch_k = k + 64;  // Als Nächstes abzurufende Daten
+    int write_idx = ((k / 32) + 1) % 2;
+    int read_idx = (k / 32) % 2;
 
-    // 1. Speichern der vorab geladenen Register im Shared Memory (synchronisiert auf die Global Loads der Voriteration)
+    // 1. Speichern der vorab geladenen Register im Shared Memory
     if (next_k < dim_k) {
       #pragma unroll
       for (int step = 0; step < 4; ++step) {
@@ -151,7 +120,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       }
     }
 
-    // 2. Initialisierung asynchroner globaler Ladevorgänge für die folgende Iteration
+    // 2. Initialisierung asynchroner globaler Ladevorgänge
     if (fetch_k < dim_k) {
       #pragma unroll
       for (int step = 0; step < 4; ++step) {
@@ -170,7 +139,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       }
     }
 
-    // 3. Tensor Core Berechnungsphase überschneidet sich mit den Global Loads aus Schritt 2
+    // 3. Tensor Core Berechnungsphase
     #pragma unroll
     for (int k_step = 0; k_step < 32; k_step += 16) {
       #pragma unroll
@@ -276,7 +245,7 @@ int main(int argc, const char **argv) {
   dim3 block = dim3(256);
   dim3 grid = dim3((m + tile_m - 1) / tile_m, (n + tile_n - 1) / tile_n);
  
-  int smem_compute = (3 * 32 * 136 + 3 * 128 * 40) * sizeof(half);
+  int smem_compute = (2 * 32 * 136 + 2 * 128 * 40) * sizeof(half);
   int smem_epilogue = 128 * 128 * sizeof(float);
   int smem_size = (smem_compute > smem_epilogue) ? smem_compute : smem_epilogue;
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
@@ -378,3 +347,7 @@ int main(int argc, const char **argv) {
  * - Implemented register double-buffering for global loads to resolve RAW stalls and overlap memory fetches with Tensor Core computation.
  * - Added shared memory staging in the epilogue for coalesced float4 writes to global memory. --> 87430.32 Gflops
  */
+  /*
+ * 17. back to 2-stage buffering --> 88720.19 Gflops
+ */
+
