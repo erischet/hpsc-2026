@@ -293,7 +293,7 @@ int main(int argc, const char **argv) {
  * 11. K-Dimension without Double Buffering: 
  * Tested K=32 with Single Buffering.
  * Performance: Dropped to ~34,269 GFLOPS.
- * Reason: Total loss of latency hiding. Tensor Cores stalled during memory fetches.
+ * Reason: Total loss of latency hiding. Tensor Csores stalled during memory fetches.
  *
  * 12. Rollback to optimal config:
  * Reverted to 128 Threads, Tile 128x64, K=16 with Double Buffering.
@@ -306,5 +306,4 @@ int main(int argc, const char **argv) {
  * 14. 3-Stage Software Pipeline Analysis:
  * Implemented 3-stage buffering to further hide global memory latency.
  * Result: Performance remained stagnant, with a slight decrease compared to the previous double-buffering baseline. 
- * Insight: The overhead introduced by complex staging and additional pointer arithmetic, combined with potential register pressure from the larger buffer structure, negated the theoretical latency hiding benefits. Furthermore, attempts at manual vectorized type conversion proved ineffective, as they introduced additional instruction overhead and disrupted optimal cache alignment.
- */
+*/

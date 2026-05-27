@@ -27,4 +27,4 @@
 13_tensorcore: 13_tensorcore.cu
 	nvcc 13_tensorcore.cu -Xcompiler "-O3 -fopenmp" -lcublas
 Geminis_proposal: Geminis_proposal.cu
-	nvcc 13_tensorcore.cu -Xcompiler "-O3 -fopenmp" -lcublas
+	nvcc 13_tensorcore.cu -O3 -arch=sm_90 -Xcompiler "-O3 -fopenmp" -lcublas
