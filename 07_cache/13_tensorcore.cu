@@ -52,7 +52,6 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     int c = (logical_id % 32) * 4;
     vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(0 + r) * dim_m + offset_a_m + c])[0];
   }
-  
   #pragma unroll
   for (int step = 0; step < 4; ++step) {
     int logical_id = step * 256 + threadIdx.x;
@@ -60,7 +59,6 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     int k_idx = (logical_id % 8) * 4;
     vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 0 + k_idx])[0];
   }
-
   #pragma unroll
   for (int step = 0; step < 4; ++step) {
     int logical_id = step * 256 + threadIdx.x;
@@ -84,7 +82,6 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       int c = (logical_id % 32) * 4;
       vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(32 + r) * dim_m + offset_a_m + c])[0];
     }
-    
     #pragma unroll
     for (int step = 0; step < 4; ++step) {
       int logical_id = step * 256 + threadIdx.x;
@@ -92,7 +89,6 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       int k_idx = (logical_id % 8) * 4;
       vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 32 + k_idx])[0];
     }
-
     #pragma unroll
     for (int step = 0; step < 4; ++step) {
       int logical_id = step * 256 + threadIdx.x;
@@ -107,6 +103,25 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       reinterpret_cast<half2*>(&block_b[1][n_idx][k_idx])[1] = __floats2half2_rn(vec_b_reg[step].z, vec_b_reg[step].w);
     }
   }
+
+  // Prologue: Pre-Fetch Stage 2 (k = 64) in Register
+  if (64 < dim_k) {
+    #pragma unroll
+    for (int step = 0; step < 4; ++step) {
+      int logical_id = step * 256 + threadIdx.x;
+      int r = logical_id / 32;
+      int c = (logical_id % 32) * 4;
+      vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(64 + r) * dim_m + offset_a_m + c])[0];
+    }
+    #pragma unroll
+    for (int step = 0; step < 4; ++step) {
+      int logical_id = step * 256 + threadIdx.x;
+      int n_idx = logical_id / 8;
+      int k_idx = (logical_id % 8) * 4;
+      vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 64 + k_idx])[0];
+    }
+  }
+  
   __syncthreads();
 
   wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag[2];
@@ -114,27 +129,13 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   // Main Loop
   for (int k = 0; k < dim_k; k += 32) {
-    int next_k = k + 64;
+    int next_k = k + 64;   // In den Registern bereitstehende Daten
+    int fetch_k = k + 96;  // Als Nächstes abzurufende Daten
     int write_idx = ((k / 32) + 2) % 3;
     int read_idx = (k / 32) % 3;
 
+    // 1. Speichern der vorab geladenen Register im Shared Memory (synchronisiert auf die Global Loads der Voriteration)
     if (next_k < dim_k) {
-      #pragma unroll
-      for (int step = 0; step < 4; ++step) {
-        int logical_id = step * 256 + threadIdx.x;
-        int r = logical_id / 32;
-        int c = (logical_id % 32) * 4;
-        vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(next_k + r) * dim_m + offset_a_m + c])[0];
-      }
-      
-      #pragma unroll
-      for (int step = 0; step < 4; ++step) {
-        int logical_id = step * 256 + threadIdx.x;
-        int n_idx = logical_id / 8;
-        int k_idx = (logical_id % 8) * 4;
-        vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + next_k + k_idx])[0];
-      }
-
       #pragma unroll
       for (int step = 0; step < 4; ++step) {
         int logical_id = step * 256 + threadIdx.x;
@@ -150,6 +151,26 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       }
     }
 
+    // 2. Initialisierung asynchroner globaler Ladevorgänge für die folgende Iteration
+    if (fetch_k < dim_k) {
+      #pragma unroll
+      for (int step = 0; step < 4; ++step) {
+        int logical_id = step * 256 + threadIdx.x;
+        int r = logical_id / 32;
+        int c = (logical_id % 32) * 4;
+        vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(fetch_k + r) * dim_m + offset_a_m + c])[0];
+      }
+      
+      #pragma unroll
+      for (int step = 0; step < 4; ++step) {
+        int logical_id = step * 256 + threadIdx.x;
+        int n_idx = logical_id / 8;
+        int k_idx = (logical_id % 8) * 4;
+        vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + fetch_k + k_idx])[0];
+      }
+    }
+
+    // 3. Tensor Core Berechnungsphase überschneidet sich mit den Global Loads aus Schritt 2
     #pragma unroll
     for (int k_step = 0; k_step < 32; k_step += 16) {
       #pragma unroll
@@ -173,11 +194,10 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     __syncthreads();
   }
 
-  // Epilogue
+  // Epilogue: Shared Memory Staging for Coalesced Writes
   __syncthreads();
   float *smem_c = reinterpret_cast<float*>(smem);
 
-  // 1. Store fragments into shared memory
   #pragma unroll
   for (int r = 0; r < 2; r++) {
     #pragma unroll
@@ -190,7 +210,6 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   __syncthreads();
 
-  // 2. Coalesced float4 writes to global memory
   #pragma unroll
   for (int i = 0; i < 16; ++i) {
     int logical_id = i * 256 + threadIdx.x;
@@ -354,4 +373,8 @@ int main(int argc, const char **argv) {
  * Updated to 32 --> better than 64 (performance decrease) --> 80782.16 Gflops
  * Tried 2 stage buffering: 79901.31 Gflops
  * Tried 4 stage buffering: 80056.43 Gflops
+ /*
+ * 16. Register Double-Buffering & Epilogue Coalescing:
+ * - Implemented register double-buffering for global loads to resolve RAW stalls and overlap memory fetches with Tensor Core computation.
+ * - Added shared memory staging in the epilogue for coalesced float4 writes to global memory.
  */
