@@ -23,6 +23,6 @@
 11_warp: 11_warp.cu
 	nvcc 11_warp.cu -Xcompiler "-O3 -fopenmp" -lcublas
 12_vector_4x2: 12_vector_4x2.cu
-	nvcc 12_vector_4x2.cu -Xcompiler "-O3 -fopenmp" -lcublas
+	nvcc Geminis_prp.cu -O3 -arch=sm_90 -Xcompiler -lcublas
 13_tensorcore: 13_tensorcore.cu
 	nvcc Geminis_prp.cu -O3 -arch=sm_90 -Xcompiler -lcublas
