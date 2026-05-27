@@ -316,5 +316,5 @@ int main(int argc, const char **argv) {
  * Transposed Matrix B in shared memory to [128][24] (N=128, K=16 + 8 padding).
  * Replaced individual 16-bit __float2half stores with 32-bit __floats2half2_rn.
  * Changed Matrix B wmma fragment to col_major.
- * Result: Halved memory store instructions, resolving the instruction pipeline bottleneck.
+ * Result: 91917.18 Gflops --> Massive increase
  */
