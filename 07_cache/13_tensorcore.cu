@@ -18,15 +18,15 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k, float *d_a, float *d_b, 
   int panel_id = bid / (gridDim.y * panel_width);
   int bid_within_panel = bid % (gridDim.y * panel_width);
   
-  int new_blockIdx_x = panel_id * panel_width + (bid_within_panel % panel_width);
+  int new_blockIdx_x = panel_id * panel_width + (bid_within_panel & 7);
   int new_blockIdx_y = bid_within_panel / panel_width;
   
   if (new_blockIdx_x >= gridDim.x || new_blockIdx_y >= gridDim.y) return;
 
   int offset_a_m = 128 * new_blockIdx_x;
   int offset_b_n = 128 * new_blockIdx_y;
-  int warp_id = threadIdx.x / 32;
-  int warp_row = warp_id % 4;
+  int warp_id = threadIdx.x >> 5;
+  int warp_row = warp_id & 3;
   
   extern __shared__ half smem[];
   
