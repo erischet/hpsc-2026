@@ -46,7 +46,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k, float *d_a, float *d_b, 
   // Prologue: Load Stage 0 (k = 0)
   #pragma unroll
   for (int step = 0; step < 4; ++step) {
-    int logical_id = step * 256 + threadIdx.x;
+    int logical_id = step * 128 + threadIdx.x;
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
     vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(0 + r) * dim_m + offset_a_m + c])[0];
