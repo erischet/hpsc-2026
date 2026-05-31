@@ -40,27 +40,28 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k, float *d_a, float *d_b, 
     for (int c = 0; c < 4; c++)
       wmma::fill_fragment(acc[r][c], 0.0f);
 
-  float4 vec_a_reg[4];
-  float4 vec_b_reg[4];
+  // WICHTIG: Die Register-Arrays müssen jetzt Größe 8 haben!
+  float4 vec_a_reg[8];
+  float4 vec_b_reg[8];
 
-  // Prologue: Load Stage 0 (k = 0)
+  // Prologue: Load Stage 0 (k = 0) - Schleifen auf 8 erhöht, Multiplikator auf 128
   #pragma unroll
-  for (int step = 0; step < 4; ++step) {
+  for (int step = 0; step < 8; ++step) {
     int logical_id = step * 128 + threadIdx.x;
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
     vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(0 + r) * dim_m + offset_a_m + c])[0];
   }
   #pragma unroll
-  for (int step = 0; step < 4; ++step) {
-    int logical_id = step * 256 + threadIdx.x;
+  for (int step = 0; step < 8; ++step) {
+    int logical_id = step * 128 + threadIdx.x;
     int n_idx = logical_id / 8;
     int k_idx = (logical_id % 8) * 4;
     vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 0 + k_idx])[0];
   }
   #pragma unroll
-  for (int step = 0; step < 4; ++step) {
-    int logical_id = step * 256 + threadIdx.x;
+  for (int step = 0; step < 8; ++step) {
+    int logical_id = step * 128 + threadIdx.x;
     int r = logical_id / 32;
     int c = (logical_id % 32) * 4;
     reinterpret_cast<half2*>(&block_a[0][r][c])[0] = __floats2half2_rn(vec_a_reg[step].x, vec_a_reg[step].y);
@@ -75,15 +76,15 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k, float *d_a, float *d_b, 
   // Prologue: Pre-Fetch Stage 1 (k = 32) in Register
   if (32 < dim_k) {
     #pragma unroll
-    for (int step = 0; step < 4; ++step) {
-      int logical_id = step * 256 + threadIdx.x;
+    for (int step = 0; step < 8; ++step) {
+      int logical_id = step * 128 + threadIdx.x;
       int r = logical_id / 32;
       int c = (logical_id % 32) * 4;
       vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(32 + r) * dim_m + offset_a_m + c])[0];
     }
     #pragma unroll
-    for (int step = 0; step < 4; ++step) {
-      int logical_id = step * 256 + threadIdx.x;
+    for (int step = 0; step < 8; ++step) {
+      int logical_id = step * 128 + threadIdx.x;
       int n_idx = logical_id / 8;
       int k_idx = (logical_id % 8) * 4;
       vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + 32 + k_idx])[0];
@@ -97,16 +98,16 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k, float *d_a, float *d_b, 
 
   // Main Loop
   for (int k = 0; k < dim_k; k += 32) {
-    int next_k = k + 32;   // In den Registern bereitstehende Daten
-    int fetch_k = k + 64;  // Als Nächstes abzurufende Daten
+    int next_k = k + 32;   
+    int fetch_k = k + 64;  
     int write_idx = ((k / 32) + 1) % 2;
     int read_idx = (k / 32) % 2;
 
     // 1. Speichern der vorab geladenen Register im Shared Memory
     if (next_k < dim_k) {
       #pragma unroll
-      for (int step = 0; step < 4; ++step) {
-        int logical_id = step * 256 + threadIdx.x;
+      for (int step = 0; step < 8; ++step) {
+        int logical_id = step * 128 + threadIdx.x;
         int r = logical_id / 32;
         int c = (logical_id % 32) * 4;
         reinterpret_cast<half2*>(&block_a[write_idx][r][c])[0] = __floats2half2_rn(vec_a_reg[step].x, vec_a_reg[step].y);
@@ -122,16 +123,16 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k, float *d_a, float *d_b, 
     // 2. Initialisierung asynchroner globaler Ladevorgänge
     if (fetch_k < dim_k) {
       #pragma unroll
-      for (int step = 0; step < 4; ++step) {
-        int logical_id = step * 256 + threadIdx.x;
+      for (int step = 0; step < 8; ++step) {
+        int logical_id = step * 128 + threadIdx.x;
         int r = logical_id / 32;
         int c = (logical_id % 32) * 4;
         vec_a_reg[step] = reinterpret_cast<float4*>(&d_a[(fetch_k + r) * dim_m + offset_a_m + c])[0];
       }
       
       #pragma unroll
-      for (int step = 0; step < 4; ++step) {
-        int logical_id = step * 256 + threadIdx.x;
+      for (int step = 0; step < 8; ++step) {
+        int logical_id = step * 128 + threadIdx.x;
         int n_idx = logical_id / 8;
         int k_idx = (logical_id % 8) * 4;
         vec_b_reg[step] = reinterpret_cast<float4*>(&d_b[(offset_b_n + n_idx) * dim_k + fetch_k + k_idx])[0];
@@ -178,9 +179,11 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k, float *d_a, float *d_b, 
 
   __syncthreads();
 
+  // Epilog-Schleife: 128 * 128 Elemente / 4 Elemente pro float4 = 4096 Vektoren.
+  // 4096 / 128 Threads = 32 Schritte!
   #pragma unroll
-  for (int i = 0; i < 16; ++i) {
-    int logical_id = i * 256 + threadIdx.x;
+  for (int i = 0; i < 32; ++i) {
+    int logical_id = i * 128 + threadIdx.x;
     int n_idx = logical_id / 32;
     int m_idx_vec = logical_id % 32;
     
