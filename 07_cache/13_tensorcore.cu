@@ -35,6 +35,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k, float *d_a, float *d_b, 
   half (*block_b)[128][40] = reinterpret_cast<half (*)[128][40]>(smem + (3 * 32 * 136));
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][8];
+  
   #pragma unroll
   for (int r = 0; r < 2; r++)
     #pragma unroll
