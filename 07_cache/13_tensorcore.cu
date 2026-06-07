@@ -355,12 +355,11 @@ int main(int argc, const char **argv) {
  *
  * 13. 3-Stage Software Pipeline: 
  * Utilize 3 stage buffering (instead of Double Buffering)
- */
- /*
+ *
  * 14. 3-Stage Software Pipeline Analysis:
  * Implemented 3-stage buffering to further hide global memory latency.
  * Result: Performance remained stagnant, with a slight decrease compared to the previous double-buffering baseline. Maybe go back later to 2-stage.
- /*
+ *
  * 15. Shared Memory Transposition & Vectorization (Matrix B):
  * Transposed Matrix B in shared memory to [128][24] (N=128, K=16 + 8 padding).
  * Replaced individual 16-bit __float2half stores with 32-bit __floats2half2_rn.
@@ -368,22 +367,19 @@ int main(int argc, const char **argv) {
  * Updated to 32 --> better than 64 (performance decrease) --> 80782.16 Gflops
  * Tried 2 stage buffering: 79901.31 Gflops
  * Tried 4 stage buffering: 80056.43 Gflops
- /*
+ *
  * 16. Register Double-Buffering & Epilogue Coalescing:
  * - Implemented register double-buffering for global loads to resolve RAW stalls and overlap memory fetches with Tensor Core computation.
  * - Added shared memory staging in the epilogue for coalesced float4 writes to global memory. --> 87430.32 Gflops
- */
-  /*
+ *
  * 17. back to 2-stage buffering --> 88720.19 Gflops
  * Reduces Register Size to 64
  * CUBLAS: 175226.40 Gflops, CUTLASS: 103169.42 Gflops
- * error: 0.003980
+ *
+ * 18. 3-Stage Software Pipeline (Register-Optimized):
+ * - Expanded shared memory to 3 stages (block_a[3], block_b[3]) to enhance latency hiding.
+ * - Kept 128 threads and optimized the pipeline to use only a single set of global load registers.
+ * - Avoided register spilling while pushing the latency-hiding capability to 3 stages.
+ * Performance: ~118,588 GFLOPS (~67.9% of cuBLAS baseline).
  */
- /*
-  * 18. 3-Stage Software Pipeline (Register-Optimized):
-  * - Expanded shared memory to 3 stages (block_a[3], block_b[3]) to enhance latency hiding.
-  * - Kept 128 threads and optimized the pipeline to use only a single set of global load registers.
-  * - Avoided register spilling while pushing the latency-hiding capability to 3 stages.
-  * Performance: ~118,588 GFLOPS (~67.9% of cuBLAS baseline).
-  */
 
